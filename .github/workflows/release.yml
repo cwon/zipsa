@@ -1,0 +1,95 @@
+name: Release Zipsa
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      # Serialize uploads so latest.json contains every platform before publishing.
+      max-parallel: 1
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: npm ci
+      - run: npm run build
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - name: Configure signed updater
+        run: node scripts/prepare-release.mjs
+        env:
+          TAURI_SIGNING_PUBLIC_KEY: ${{ vars.TAURI_SIGNING_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          ZIPSA_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          ZIPSA_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          ZIPSA_APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          ZIPSA_APPLE_ID: ${{ secrets.APPLE_ID }}
+          ZIPSA_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          ZIPSA_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "집사 · Zipsa ${{ github.ref_name }}"
+          releaseBody: "집사 설치 파일입니다. macOS는 DMG, Windows는 설치 EXE를 내려받아 주세요."
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          args: --target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish only after all platforms succeed
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = context.ref.replace('refs/tags/', '');
+            const { data: releases } = await github.rest.repos.listReleases({ owner, repo, per_page: 100 });
+            const release = releases.find(r => r.tag_name === tag);
+            if (!release) throw new Error('빌드된 릴리스를 찾을 수 없습니다.');
+            const { data: assets } = await github.rest.repos.listReleaseAssets({ owner, repo, release_id: release.id, per_page: 100 });
+            const asset = assets.find(a => a.name === 'latest.json');
+            if (!asset) throw new Error('업데이트 매니페스트가 없습니다.');
+            const response = await github.rest.repos.getReleaseAsset({ owner, repo, asset_id: asset.id, headers: { accept: 'application/octet-stream' } });
+            const raw = response.data;
+            const manifest = typeof raw === 'string' ? JSON.parse(raw) : raw instanceof ArrayBuffer ? JSON.parse(Buffer.from(raw).toString('utf8')) : raw;
+            if (manifest.version.replace(/^v/, '') !== tag.slice(1)) throw new Error('업데이트 버전이 태그와 다릅니다.');
+            for (const platform of ['darwin-aarch64', 'darwin-x86_64', 'windows-x86_64']) {
+              const entry = manifest.platforms?.[platform];
+              if (!entry?.signature || !entry?.url?.startsWith(`https://github.com/${owner}/${repo}/releases/download/`)) {
+                throw new Error(`업데이트 파일이 완성되지 않았습니다: ${platform}`);
+              }
+            }
+            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, draft: false, make_latest: 'true' });

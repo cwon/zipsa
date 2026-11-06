@@ -1,0 +1,41 @@
+Use case: infographic-diagram.
+Asset type: ONE finished Korean infographic poster for community sharing, introducing the real local desktop app 집사 / Zipsa.
+Format: portrait 3:4, high resolution, ideally 1536 × 2048 pixels. One complete standalone image, opaque background.
+
+Design: polished editorial information design, approachable flat illustrations, crisp vector-like shapes, generous margins and clear visual hierarchy. A very light warm gray-white background, deep charcoal Korean sans-serif typography, emerald green matching Zipsa's app interface. Color-code concepts consistently: green for spaces, warm amber for items, muted blue for tasks. Subtle thin connector lines, softly rounded containers, small recognizable illustrations of a house, bookcase, compartment, refrigerator, book, milk carton, and air purifier. No people or mascots. Korean type must be large and exceptionally readable on a phone, all text rendered verbatim, no extra copy.
+
+Top:
+Large brand name “집사” with “Zipsa” beside it, spelled exactly Z-i-p-s-a. A small simple emerald house/check pictogram may accompany the name.
+Subtitle: “공간 · 아이템 · 할 일을 연결하는 로컬 앱”
+Small platform line: “macOS · Windows”
+
+Main section:
+Heading “공간 안에 또 다른 공간”
+Draw one unambiguous containment tree, not a floor plan:
+a green root “우리 집” branches to two green spaces “책장” and “냉장고”.
+“책장” connects downward to its green subspace “첫째 칸”, which contains the amber item “책”.
+“냉장고” connects downward to its green subspace “냉장칸”, which contains the amber item “우유”.
+Every green node is a SPACE and may have a small “공간” label; both amber leaves have an “아이템” label. Keep arrows thin and clean with no crossed lines. Use illustrations to make the hierarchy friendly and understandable to nontechnical readers.
+Caption: “각 공간에는 하위 공간과 아이템을 함께 담을 수 있어요.”
+
+Next, a concise amber-accented item information strip:
+Heading “아이템은 정보와 함께”
+Text “사진 · 수량 · 유통기한 · 구매정보”
+Use four small matching pictograms if space permits.
+
+Next, a blue-accented task section:
+Heading “할 일은 공간에도, 아이템에도”
+Two clear example rows, with source entity type visible and a dashed blue binding connector:
+space badge “공간” + “냉장고” connects to task “청소하기”.
+item badge “아이템” + “공기청정기” connects to task “필터 교체”.
+Do not depict a task as a physical object stored inside a compartment: these dashed links mean a task is associated with a space OR with an item.
+Below, three evenly sized scheduling chips, with these heading/example pairs:
+“한 번” / “원하는 날짜에”
+“날짜 기준 반복” / “매주 토요일”
+“완료일 기준 반복” / “완료 후 90일”
+
+Footer in a calm emerald-tinted panel, with a local disk pictogram:
+Main line “모든 생활 정보는 내 컴퓨터에”
+Smaller line “로컬 저장 · 백업과 복원 · 백그라운드 알림”
+
+Constraints: prioritize accurate readable Korean and the correct entity relationships. All meaningful content is explained in this single image. No watermarks, URLs, QR codes, cloud sync claims, encryption claims, invented statistics, device mockups, screenshots, extra feature lists, or unrelated decorative text. Maintain a coherent calm green/amber/blue palette and a clean, finished community-share poster aesthetic.
