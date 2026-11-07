@@ -67,3 +67,5 @@ npm run desktop
 ## 라이선스
 
 [MIT](LICENSE) · Copyright (c) 2026 cwon
+
+화면 글꼴로 [Pretendard](https://github.com/orioncactus/pretendard)를 앱에 포함합니다. Pretendard는 [SIL Open Font License 1.1](https://openfontlicense.org)을 따릅니다.

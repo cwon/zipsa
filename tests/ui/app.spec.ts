@@ -240,21 +240,21 @@ test("switches between light and dark themes and remembers the choice", async ({
   await mockDesktop(page, { ...empty, spaces: [home] });
   await page.goto("/");
   await expect(root).not.toHaveAttribute("data-theme");
-  await expect(body).toHaveCSS("background-color", "rgb(244, 246, 245)");
+  await expect(body).toHaveCSS("background-color", "rgb(255, 255, 255)");
 
   await page.getByRole("button", { name: /^설정/ }).click();
   const dark = page.getByRole("radio", { name: "다크", exact: true });
   await dark.click();
   await expect(dark).toHaveAttribute("aria-checked", "true");
   await expect(root).toHaveAttribute("data-theme", "dark");
-  await expect(body).toHaveCSS("background-color", "rgb(12, 17, 15)");
+  await expect(body).toHaveCSS("background-color", "rgb(17, 17, 17)");
   await expect.poll(lastNativeTheme).toBe("dark");
 
   await page.reload();
   await expect(root).toHaveAttribute("data-theme", "dark");
   await page.getByRole("button", { name: "라이트 테마로 전환" }).click();
   await expect(root).toHaveAttribute("data-theme", "light");
-  await expect(body).toHaveCSS("background-color", "rgb(244, 246, 245)");
+  await expect(body).toHaveCSS("background-color", "rgb(255, 255, 255)");
   await expect.poll(lastNativeTheme).toBe("light");
 
   await page.getByRole("button", { name: /^설정/ }).click();
@@ -262,7 +262,7 @@ test("switches between light and dark themes and remembers the choice", async ({
   await expect(root).not.toHaveAttribute("data-theme");
   await expect.poll(lastNativeTheme).toBe(null);
   await page.emulateMedia({ colorScheme: "dark" });
-  await expect(body).toHaveCSS("background-color", "rgb(12, 17, 15)");
+  await expect(body).toHaveCSS("background-color", "rgb(17, 17, 17)");
   await expect(
     page.getByRole("button", { name: "라이트 테마로 전환" }),
   ).toBeVisible();

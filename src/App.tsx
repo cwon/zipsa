@@ -8,10 +8,8 @@ import {
 import {
   ArrowDownToLine,
   ArrowRight,
+  ArrowUpRight,
   ArrowUpFromLine,
-  Bell,
-  Box,
-  CalendarDays,
   Check,
   CheckCheck,
   ChevronDown,
@@ -29,14 +27,11 @@ import {
   Monitor,
   Moon,
   Package,
-  Palette,
   Plus,
   RefreshCw,
   Search,
-  Settings,
   ShieldCheck,
   SkipForward,
-  Sparkles,
   Sun,
   Trash2,
   Undo2,
@@ -69,6 +64,14 @@ const pageTitles: Record<Page, string> = {
   tasks: "할 일",
   history: "수행 기록",
   settings: "설정",
+};
+const pageIndex: Record<Page, string> = {
+  today: "01",
+  spaces: "02",
+  items: "03",
+  tasks: "04",
+  history: "05",
+  settings: "06",
 };
 const themeOptions: [ThemePreference, typeof Monitor, string][] = [
   ["system", Monitor, "시스템 설정"],
@@ -107,6 +110,15 @@ function ThemePreview({ mode }: { mode: ThemePreference }) {
         pane(mode)
       )}
     </span>
+  );
+}
+
+function Eyebrow({ index, children }: { index?: string; children: ReactNode }) {
+  return (
+    <div className="eyebrow">
+      {index && <span className="eyebrow-index">{index}</span>}
+      <span>{children}</span>
+    </div>
   );
 }
 
@@ -367,8 +379,8 @@ export default function App() {
   if (!data)
     return (
       <main className="loading-screen">
-        <div className="brand-mark">
-          <House size={34} />
+        <div className="brand-mark" aria-hidden="true">
+          집
         </div>
         <h1>
           집사 <span>Zipsa</span>
@@ -511,11 +523,15 @@ export default function App() {
                 }
               >
                 {task.active ? (
-                  <Circle size={24} strokeWidth={1.5} />
+                  <span className="tick" />
                 ) : record ? (
-                  <CheckCheck size={23} />
+                  <span className="tick done">
+                    <Check size={14} strokeWidth={3} />
+                  </span>
                 ) : (
-                  <Clock3 size={23} />
+                  <span className="tick idle">
+                    <Clock3 size={13} />
+                  </span>
                 )}
               </button>
               <button
@@ -642,7 +658,7 @@ export default function App() {
                 {data!.items.filter((i) => i.spaceId === space.id).length}
               </p>
             </div>
-            <ChevronRight size={17} />
+            <ArrowRight size={16} />
           </button>
         ))}
       </div>
@@ -661,8 +677,8 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <button className="brand" onClick={() => navigate("today")}>
-          <span className="brand-mark">
-            <House size={24} strokeWidth={1.8} />
+          <span className="brand-mark" aria-hidden="true">
+            집
           </span>
           <span>
             집사<small>Zipsa</small>
@@ -672,19 +688,21 @@ export default function App() {
         <nav className="main-nav" aria-label="주 메뉴">
           {(
             [
-              ["today", Sparkles, "오늘의 집사"],
-              ["spaces", House, "내 공간"],
-              ["items", Package, "모든 아이템"],
-              ["tasks", CheckCheck, "할 일"],
-              ["history", History, "수행 기록"],
+              ["today", "오늘의 집사"],
+              ["spaces", "내 공간"],
+              ["items", "모든 아이템"],
+              ["tasks", "할 일"],
+              ["history", "수행 기록"],
             ] as const
-          ).map(([key, Icon, label]) => (
+          ).map(([key, label]) => (
             <button
               key={key}
               className={`nav-item ${page === key && !normalizedQuery ? "active" : ""}`}
               onClick={() => navigate(key)}
             >
-              <Icon size={18} />
+              <span className="nav-index" aria-hidden="true">
+                {pageIndex[key]}
+              </span>
               <span>{label}</span>
               {key === "tasks" && dueTasks.length > 0 && (
                 <span className="nav-count">{dueTasks.length}</span>
@@ -725,7 +743,9 @@ export default function App() {
             className={`nav-item ${page === "settings" && !normalizedQuery ? "active" : ""}`}
             onClick={() => navigate("settings")}
           >
-            <Settings size={18} />
+            <span className="nav-index" aria-hidden="true">
+              {pageIndex.settings}
+            </span>
             설정<span className="version">v{info?.version ?? "0.1.0"}</span>
           </button>
         </div>
@@ -733,9 +753,11 @@ export default function App() {
       <div className="workspace">
         <header className="topbar">
           <div className="breadcrumb">
-            <House size={14} />
-            <ChevronRight size={12} />
-            <span>
+            <span className="crumb-root">집사</span>
+            <span className="crumb-sep" aria-hidden="true">
+              /
+            </span>
+            <span className="crumb-current">
               {selected && page === "spaces"
                 ? spacePath(data.spaces, selected.id)
                 : pageTitles[page]}
@@ -791,7 +813,7 @@ export default function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <div className="eyebrow">SEARCH</div>
+                  <Eyebrow>SEARCH</Eyebrow>
                   <h1>‘{query.trim()}’ 검색 결과</h1>
                   <p>이름, 메모, 구매처와 보관 위치를 함께 찾아요.</p>
                 </div>
@@ -837,16 +859,13 @@ export default function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <div className="eyebrow">
+                  <Eyebrow index={pageIndex.today}>
+                    TODAY · {localDate(now).split("-").join(".")}{" "}
                     {new Intl.DateTimeFormat("ko-KR", {
-                      month: "long",
-                      day: "numeric",
-                      weekday: "long",
+                      weekday: "short",
                     }).format(now)}
-                  </div>
-                  <h1>
-                    오늘도, 편안한 내 공간<span className="heading-dot">.</span>
-                  </h1>
+                  </Eyebrow>
+                  <h1>오늘도, 편안한 내 공간.</h1>
                   <p>
                     어디에 무엇이 있는지, 언제 돌봐야 하는지. 집사가 기억할게요.
                   </p>
@@ -859,70 +878,50 @@ export default function App() {
                 </button>
               </div>
               <div className="stats-grid">
-                <button
-                  className="stat-card"
-                  onClick={() => navigate("spaces")}
-                >
-                  <span className="stat-icon green">
-                    <House size={20} />
-                  </span>
-                  <div>
-                    <span>관리하는 공간</span>
+                {(
+                  [
+                    [
+                      "관리하는 공간",
+                      data.spaces.length,
+                      "곳",
+                      () => navigate("spaces"),
+                    ],
+                    [
+                      "보관 중인 아이템",
+                      data.items.length,
+                      "종류",
+                      () => navigate("items"),
+                    ],
+                    [
+                      "오늘까지 할 일",
+                      dueTasks.length,
+                      "개",
+                      () => {
+                        navigate("tasks");
+                        setTaskFilter("due");
+                      },
+                    ],
+                    [
+                      "오늘 완료한 일",
+                      completedToday,
+                      "개",
+                      () => navigate("history"),
+                    ],
+                  ] as const
+                ).map(([label, value, unit, onClick]) => (
+                  <button
+                    key={label}
+                    className={`stat-card ${label === "오늘까지 할 일" && value > 0 ? "attention" : ""}`}
+                    onClick={onClick}
+                  >
+                    <span className="stat-label">{label}</span>
                     <strong>
-                      {data.spaces.length}
-                      <small>곳</small>
+                      {value}
+                      <small>{unit}</small>
                     </strong>
-                  </div>
-                  <ChevronRight size={15} />
-                </button>
-                <button className="stat-card" onClick={() => navigate("items")}>
-                  <span className="stat-icon sand">
-                    <Package size={20} />
-                  </span>
-                  <div>
-                    <span>보관 중인 아이템</span>
-                    <strong>
-                      {data.items.length}
-                      <small>종류</small>
-                    </strong>
-                  </div>
-                  <ChevronRight size={15} />
-                </button>
-                <button
-                  className="stat-card"
-                  onClick={() => {
-                    navigate("tasks");
-                    setTaskFilter("due");
-                  }}
-                >
-                  <span className="stat-icon peach">
-                    <Clock3 size={20} />
-                  </span>
-                  <div>
-                    <span>오늘까지 할 일</span>
-                    <strong>
-                      {dueTasks.length}
-                      <small>개</small>
-                    </strong>
-                  </div>
-                  <ChevronRight size={15} />
-                </button>
-                <button
-                  className="stat-card"
-                  onClick={() => navigate("history")}
-                >
-                  <span className="stat-icon blue">
-                    <Check size={20} />
-                  </span>
-                  <div>
-                    <span>오늘 완료한 일</span>
-                    <strong>
-                      {completedToday}
-                      <small>개</small>
-                    </strong>
-                  </div>
-                  <ChevronRight size={15} />
-                </button>
+                    <ArrowUpRight size={16} />
+                  </button>
+                ))}
               </div>
               {!data.spaces.length ? (
                 <section className="welcome panel">
@@ -947,7 +946,6 @@ export default function App() {
                   <section className="section panel">
                     <div className="section-heading">
                       <h2>
-                        <span className="small-dot" />
                         오늘 챙길 일
                         <span className="count">{dueTasks.length}</span>
                       </h2>
@@ -966,10 +964,7 @@ export default function App() {
                   <div className="dashboard-columns">
                     <section className="section panel">
                       <div className="section-heading">
-                        <h2>
-                          <CalendarDays size={17} />
-                          다가오는 일정
-                        </h2>
+                        <h2>다가오는 일정</h2>
                         <span className="subtle">7일 이내</span>
                       </div>
                       {taskRows(
@@ -979,10 +974,7 @@ export default function App() {
                     </section>
                     <section className="section panel">
                       <div className="section-heading">
-                        <h2>
-                          <Box size={17} />
-                          유통기한 확인
-                        </h2>
+                        <h2>유통기한 확인</h2>
                         <span className="subtle">7일 이내·기한 경과</span>
                       </div>
                       {expiringItems.length ? (
@@ -1047,7 +1039,7 @@ export default function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <div className="eyebrow">MY SPACES</div>
+                  <Eyebrow index={pageIndex.spaces}>SPACES</Eyebrow>
                   <h1>
                     {selected && (
                       <span className="title-emoji">{selected.icon}</span>
@@ -1153,7 +1145,7 @@ export default function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <div className="eyebrow">MY BELONGINGS</div>
+                  <Eyebrow index={pageIndex.items}>ITEMS</Eyebrow>
                   <h1>모든 아이템</h1>
                   <p>물건의 위치와 구매정보를 한눈에 확인하세요.</p>
                 </div>
@@ -1216,7 +1208,7 @@ export default function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <div className="eyebrow">CARE & ROUTINE</div>
+                  <Eyebrow index={pageIndex.tasks}>TASKS</Eyebrow>
                   <h1>할 일</h1>
                   <p>공간도, 물건도. 알맞은 때에 돌봐 주세요.</p>
                 </div>
@@ -1261,7 +1253,7 @@ export default function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <div className="eyebrow">LITTLE STEPS, WELL KEPT</div>
+                  <Eyebrow index={pageIndex.history}>HISTORY</Eyebrow>
                   <h1>수행 기록</h1>
                   <p>내 공간을 돌본 시간이 차곡차곡 쌓여요.</p>
                 </div>
@@ -1326,7 +1318,7 @@ export default function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <div className="eyebrow">MAKE YOURSELF AT HOME</div>
+                  <Eyebrow index={pageIndex.settings}>SETTINGS</Eyebrow>
                   <h1>설정</h1>
                   <p>집사를 내 생활에 맞게 설정하세요.</p>
                 </div>
@@ -1334,10 +1326,7 @@ export default function App() {
               <div className="settings-stack">
                 <section className="panel settings-section">
                   <div className="section-heading">
-                    <h2>
-                      <Palette size={18} />
-                      화면 테마
-                    </h2>
+                    <h2>화면 테마</h2>
                   </div>
                   <p className="setting-description">
                     밝은 테마와 다크 테마 중에서 고르거나, 운영체제 설정을
@@ -1370,10 +1359,7 @@ export default function App() {
                 </section>
                 <section className="panel settings-section">
                   <div className="section-heading">
-                    <h2>
-                      <Bell size={18} />
-                      알림과 실행
-                    </h2>
+                    <h2>알림과 실행</h2>
                   </div>
                   <div className="setting-row">
                     <div>
@@ -1421,9 +1407,7 @@ export default function App() {
                 </section>
                 <section className="panel settings-section">
                   <div className="section-heading">
-                    <h2>
-                      <HardDrive size={18} />내 데이터와 백업
-                    </h2>
+                    <h2>내 데이터와 백업</h2>
                   </div>
                   <div className="privacy-note">
                     <ShieldCheck size={23} />
@@ -1468,10 +1452,7 @@ export default function App() {
                 </section>
                 <section className="panel settings-section">
                   <div className="section-heading">
-                    <h2>
-                      <RefreshCw size={18} />
-                      집사 업데이트
-                    </h2>
+                    <h2>집사 업데이트</h2>
                     <span className="schedule-tag">v{info?.version}</span>
                   </div>
                   <p className="setting-description">
@@ -1527,7 +1508,9 @@ export default function App() {
                   </button>
                 </section>
                 <div className="app-signature">
-                  <House size={20} />
+                  <span className="brand-mark small" aria-hidden="true">
+                    집
+                  </span>
                   <strong>집사</strong>
                   <span>Zipsa · 나의 공간, 나의 기록.</span>
                 </div>
@@ -1535,7 +1518,7 @@ export default function App() {
             </>
           )}
           <footer className="page-footer">
-            <Leaf size={13} />
+            <span>집사 · Zipsa</span>
             <span>내 공간을 아끼는 마음, 집사</span>
           </footer>
         </main>
