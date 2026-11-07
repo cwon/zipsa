@@ -150,6 +150,10 @@ function Empty({
   );
 }
 
+// Share the startup request across React's development remounts. It is reset
+// when the app's webview starts again; manual checks always make a fresh request.
+let startupReleaseRequest: Promise<ReleaseCheck> | undefined;
+
 export default function App() {
   const [data, setData] = useState<Snapshot | null>(null);
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -178,6 +182,9 @@ export default function App() {
   const [updateMessage, setUpdateMessage] = useState("");
   const [updateError, setUpdateError] = useState(false);
   const [releaseCheck, setReleaseCheck] = useState<ReleaseCheck | null>(null);
+  const [startupRelease, setStartupRelease] = useState<ReleaseCheck | null>(
+    null,
+  );
   const [feedbackBusy, setFeedbackBusy] = useState(false);
   const theme = useTheme();
 
@@ -201,16 +208,28 @@ export default function App() {
     }
   }
   useEffect(() => {
+    let mounted = true;
     void load();
-    if (isTauri())
+    if (isTauri()) {
       void isEnabled()
         .then((value) => {
           setAutoStart(value);
           setAutoStartAvailable(true);
         })
         .catch(() => {});
+      startupReleaseRequest ??= invoke<ReleaseCheck>("check_latest_release");
+      void startupReleaseRequest
+        .then((release) => {
+          if (mounted && release.updateAvailable && release.latestVersion) {
+            setStartupRelease(release);
+          }
+        })
+        // Startup stays usable offline. Settings still provides a retry path.
+        .catch(() => {});
+    }
     const clock = window.setInterval(() => setNow(new Date()), 30_000);
     return () => {
+      mounted = false;
       window.clearInterval(clock);
     };
   }, []);
@@ -836,6 +855,37 @@ export default function App() {
             </button>
           </div>
         </header>
+        {startupRelease && (
+          <div
+            className="startup-update-banner"
+            role="status"
+            aria-label="새 버전 알림"
+          >
+            <RefreshCw size={20} aria-hidden="true" />
+            <div>
+              <strong>
+                집사 v{startupRelease.latestVersion} 새 버전이 있어요.
+              </strong>
+              <p>
+                현재 버전 v{info?.version} · 변경 내용을 확인하고 설치 파일을
+                받을 수 있어요.
+              </p>
+            </div>
+            <button
+              className="button"
+              onClick={() => void openDownloadPage(true)}
+            >
+              <ExternalLink size={15} />새 버전 다운로드
+            </button>
+            <button
+              className="icon-button"
+              aria-label="업데이트 알림 닫기"
+              onClick={() => setStartupRelease(null)}
+            >
+              <X size={18} />
+            </button>
+          </div>
+        )}
         <main
           className={`main-content ${page === "calendar" && !normalizedQuery ? "calendar-content" : ""}`}
         >
@@ -1499,8 +1549,8 @@ export default function App() {
                     최신 버전을 확인하고 GitHub 다운로드 페이지로 이동해요.
                   </p>
                   <p className="field-hint">
-                    확인할 때 GitHub에 연결해요. 공간·아이템·할 일 데이터는
-                    전송하지 않아요.
+                    앱을 시작할 때 한 번, 또는 아래 버튼으로 확인할 때 GitHub에
+                    연결해요. 공간·아이템·할 일 데이터는 전송하지 않아요.
                   </p>
                   <div className="setting-actions">
                     <button

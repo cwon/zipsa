@@ -24,7 +24,7 @@ const home = {
 async function mockDesktop(
   page: Page,
   initial: Snapshot = empty,
-  update: { result?: ReleaseCheck; error?: string } = {},
+  update: { result?: ReleaseCheck; error?: string; hold?: boolean } = {},
   feedback: { available?: boolean; error?: string } = {},
   calendar: {
     events?: CalendarEvent[];
@@ -119,6 +119,10 @@ async function mockDesktop(
             }
             if (command === "check_latest_release") {
               updateRequests.checks += 1;
+              if (update.hold)
+                await new Promise<void>((resolve) => {
+                  Object.assign(window, { __resolveStartupUpdate: resolve });
+                });
               if (update.error) throw update.error;
               return (
                 update.result ?? {
@@ -523,7 +527,51 @@ async function updateRequests(page: Page) {
   );
 }
 
-test("checks on demand and opens the new release page only after the download button is clicked", async ({
+test("checks at startup without blocking the app and shows a dismissible download notice", async ({
+  page,
+}) => {
+  await mockDesktop(page, empty, {
+    result: {
+      latestVersion: "0.3.0",
+      updateAvailable: true,
+      notes: "새 달력 기능",
+    },
+    hold: true,
+  });
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "주 메뉴" })).toBeVisible();
+  const banner = page.getByRole("status", { name: "새 버전 알림" });
+  await expect(banner).toHaveCount(0);
+  await page.evaluate(() =>
+    (
+      window as unknown as { __resolveStartupUpdate: () => void }
+    ).__resolveStartupUpdate(),
+  );
+  await expect(banner).toContainText("v0.3.0 새 버전이 있어요.");
+  expect(await updateRequests(page)).toEqual({ checks: 1, pages: [] });
+  await banner
+    .getByRole("button", { name: "새 버전 다운로드", exact: true })
+    .click();
+  expect(await updateRequests(page)).toEqual({ checks: 1, pages: [true] });
+  await banner
+    .getByRole("button", { name: "업데이트 알림 닫기", exact: true })
+    .click();
+  await expect(banner).toHaveCount(0);
+  await page.getByRole("button", { name: /^설정/ }).click();
+  expect((await updateRequests(page)).checks).toBe(1);
+  await expect(banner).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("navigation", { name: "주 메뉴" })).toBeVisible();
+  await page.evaluate(() =>
+    (
+      window as unknown as { __resolveStartupUpdate: () => void }
+    ).__resolveStartupUpdate(),
+  );
+  await expect(banner).toContainText("v0.3.0 새 버전이 있어요.");
+  expect(await updateRequests(page)).toEqual({ checks: 1, pages: [] });
+});
+
+test("supports manual rechecks after startup and opens downloads only on request", async ({
   page,
 }) => {
   await mockDesktop(page, empty, {
@@ -535,22 +583,22 @@ test("checks on demand and opens the new release page only after the download bu
   });
   await page.goto("/");
   await page.getByRole("button", { name: /^설정/ }).click();
-  expect(await updateRequests(page)).toEqual({ checks: 0, pages: [] });
+  expect(await updateRequests(page)).toEqual({ checks: 1, pages: [] });
   await page
     .getByRole("button", { name: "최신 버전 확인", exact: true })
     .click();
-  await expect(page.getByRole("status")).toContainText(
+  await expect(page.locator(".update-message")).toContainText(
     "v0.2.0 새 버전이 있어요.",
   );
   await expect(page.locator(".release-notes")).toContainText("공간 검색 개선");
-  expect(await updateRequests(page)).toEqual({ checks: 1, pages: [] });
+  expect(await updateRequests(page)).toEqual({ checks: 2, pages: [] });
   await expect(
     page.getByRole("button", { name: /설치|다시 시작/ }),
   ).toHaveCount(0);
   await page
     .getByRole("button", { name: "다운로드 페이지로 이동", exact: true })
     .click();
-  expect(await updateRequests(page)).toEqual({ checks: 1, pages: [true] });
+  expect(await updateRequests(page)).toEqual({ checks: 2, pages: [true] });
 });
 
 test("does not offer an update when the installed version is current", async ({
@@ -561,6 +609,9 @@ test("does not offer an update when the installed version is current", async ({
   });
   await page.goto("/");
   await page.getByRole("button", { name: /^설정/ }).click();
+  await expect(page.getByRole("status", { name: "새 버전 알림" })).toHaveCount(
+    0,
+  );
   await page
     .getByRole("button", { name: "최신 버전 확인", exact: true })
     .click();
@@ -593,6 +644,8 @@ test("allows retry and direct release-page navigation after a failed version che
 }) => {
   await mockDesktop(page, empty, { error: "GitHub 요청이 제한되었어요." });
   await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "주 메뉴" })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
   await page.getByRole("button", { name: /^설정/ }).click();
   const button = page.getByRole("button", {
     name: "최신 버전 확인",
@@ -607,7 +660,7 @@ test("allows retry and direct release-page navigation after a failed version che
     page.getByRole("button", { name: "다운로드 페이지로 이동", exact: true }),
   ).toHaveCount(0);
   await button.click();
-  await expect.poll(async () => (await updateRequests(page)).checks).toBe(2);
+  await expect.poll(async () => (await updateRequests(page)).checks).toBe(3);
   await page
     .getByRole("button", { name: "GitHub 릴리스 보기", exact: true })
     .click();
