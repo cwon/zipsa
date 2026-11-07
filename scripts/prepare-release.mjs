@@ -6,12 +6,13 @@ const cargo = await readFile("src-tauri/Cargo.toml", "utf8");
 const cargoVersion = cargo.match(/^version = "([^"]+)"/m)?.[1];
 const tag = process.env.GITHUB_REF_NAME;
 if (
+  !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(pkg.version) ||
   pkg.version !== tauri.version ||
   pkg.version !== cargoVersion ||
   tag !== `v${pkg.version}`
 ) {
   throw new Error(
-    "태그와 package.json, Cargo.toml, tauri.conf.json의 버전이 일치해야 합니다.",
+    "태그와 package.json, Cargo.toml, tauri.conf.json의 버전이 일치하는 정식 버전(x.y.z)이어야 합니다.",
   );
 }
 console.log(`Release version verified: ${pkg.version}`);

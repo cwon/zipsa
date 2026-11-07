@@ -57,6 +57,8 @@ Rust 테스트는 공간 관계, 복원 검증, 회차 중복 완료, 기록 보
 
 `.github/workflows/ci.yml`은 `main` 푸시와 PR에서 검증을 수행합니다. `release.yml`은 `v0.1.0` 같은 태그에서 Apple Silicon·Intel Mac의 DMG와 Windows x64 설치 EXE를 빌드합니다. 세 설치 파일이 모두 업로드되었는지 확인한 뒤 GitHub Release를 공개합니다.
 
+README의 `/releases/latest`와 `/releases/latest/download/파일명` 링크는 최신 정식 릴리스를 가리킵니다. 설치 파일명은 `Zipsa-macOS-arm64.dmg`, `Zipsa-macOS-x64.dmg`, `Zipsa-Windows-x64.exe`로 고정하고 버전별 릴리스에서 각각 보관합니다. 빌드 중에는 기존 최신 버전이 유지되며, 모든 플랫폼의 빌드가 성공하면 더 높은 버전의 릴리스를 최신으로 지정합니다. `latest`라는 별도 Git 태그는 만들지 않습니다.
+
 앱 내 자동 설치를 사용하지 않으므로 업데이트 전용 서명 키와 `latest.json`은 필요하지 않습니다. 새 버전 배포 시 `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`의 버전을 함께 변경하고 일치하는 `v버전` 태그를 푸시합니다.
 
 macOS 외부 배포의 코드 서명·공증에는 별도의 Apple 개발자 자격이 필요합니다. 다음 선택 설정을 릴리스 워크플로가 지원합니다.

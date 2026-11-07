@@ -12,19 +12,66 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Validate release version
+        run: node scripts/prepare-release.mjs
+      - name: Prepare a shared draft release
+        id: release
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = context.ref.replace('refs/tags/', '');
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            let release = releases.find(r => r.tag_name === tag);
+            if (release && !release.draft) {
+              throw new Error('이미 공개한 버전입니다. 새 버전 태그로 배포하세요.');
+            }
+            if (!release) {
+              const { data } = await github.rest.repos.createRelease({
+                owner, repo, tag_name: tag,
+                name: `집사 · Zipsa ${tag}`,
+                body: [
+                  '집·사무실의 공간, 아이템, 할 일을 내 컴퓨터에서 관리하는 데스크톱 앱입니다.',
+                  '',
+                  '- Apple Silicon Mac: `Zipsa-macOS-arm64.dmg`',
+                  '- Intel Mac: `Zipsa-macOS-x64.dmg`',
+                  '- Windows x64: `Zipsa-Windows-x64.exe`',
+                  '',
+                  '지원 환경: macOS 13 이상 · Windows 10 이상(x64).',
+                  'macOS 공증과 Windows 코드 서명이 적용되지 않은 초기 개발 버전입니다.',
+                  '',
+                  '사진을 포함한 생활 정보는 로컬에 저장합니다. 버전 확인은 앱 설정에서 직접 실행하며, 설치는 다운로드 후 진행합니다.',
+                ].join('\n'),
+                draft: true, prerelease: false,
+              });
+              release = data;
+            }
+            core.setOutput('id', String(release.id));
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
-      # Avoid concurrent creation of the same draft release.
-      max-parallel: 1
       matrix:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+            asset: Zipsa-macOS-arm64
           - os: macos-latest
             target: x86_64-apple-darwin
+            asset: Zipsa-macOS-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            asset: Zipsa-Windows-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -38,6 +85,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
       - run: npm ci
       - run: npm run build
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
@@ -54,38 +102,55 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           tagName: ${{ github.ref_name }}
-          releaseName: "집사 · Zipsa ${{ github.ref_name }}"
-          releaseBody: "집사 설치 파일입니다. macOS는 DMG, Windows는 설치 EXE를 내려받아 주세요."
           releaseDraft: true
           prerelease: false
+          releaseAssetNamePattern: ${{ matrix.asset }}[ext]
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
-          generateReleaseNotes: true
           args: --target ${{ matrix.target }} --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }}
 
   publish:
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
+    concurrency:
+      group: publish-latest
+      cancel-in-progress: false
     steps:
       - name: Publish only after all platforms succeed
         uses: actions/github-script@v8
+        env:
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
         with:
           script: |
             const { owner, repo } = context.repo;
-            const tag = context.ref.replace('refs/tags/', '');
-            const { data: releases } = await github.rest.repos.listReleases({ owner, repo, per_page: 100 });
-            const release = releases.find(r => r.tag_name === tag);
-            if (!release) throw new Error('빌드된 릴리스를 찾을 수 없습니다.');
-            const { data: assets } = await github.rest.repos.listReleaseAssets({ owner, repo, release_id: release.id, per_page: 100 });
+            const release_id = Number(process.env.RELEASE_ID);
+            const { data: release } = await github.rest.repos.getRelease({ owner, repo, release_id });
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { owner, repo, release_id, per_page: 100 });
             const required = [
-              ['Apple Silicon Mac', /_aarch64\.dmg$/i],
-              ['Intel Mac', /_x64\.dmg$/i],
-              ['Windows x64', /_x64-setup\.exe$/i],
+              'Zipsa-macOS-arm64.dmg',
+              'Zipsa-macOS-x64.dmg',
+              'Zipsa-Windows-x64.exe',
             ];
-            for (const [platform, pattern] of required) {
-              if (!assets.some(asset => pattern.test(asset.name) && asset.state === 'uploaded' && asset.size > 0)) {
-                throw new Error(`설치 파일이 완성되지 않았습니다: ${platform}`);
+            for (const name of required) {
+              if (!assets.some(asset => asset.name === name && asset.state === 'uploaded' && asset.size > 0)) {
+                throw new Error(`설치 파일이 완성되지 않았습니다: ${name}`);
               }
             }
-            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, draft: false, make_latest: 'true' });
+            let latest;
+            try {
+              ({ data: latest } = await github.rest.repos.getLatestRelease({ owner, repo }));
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            const version = tag => tag.slice(1).split('.').map(Number);
+            const isNewer = (a, b) => {
+              const other = version(b);
+              for (const [index, part] of version(a).entries()) {
+                if (part !== other[index]) return part > other[index];
+              }
+              return false;
+            };
+            const makeLatest = !latest || isNewer(release.tag_name, latest.tag_name);
+            await github.rest.repos.updateRelease({ owner, repo, release_id, draft: false, make_latest: makeLatest ? 'true' : 'false' });
