@@ -19,21 +19,35 @@ console.log(`Release version verified: ${pkg.version}`);
 
 // Only export configured signing values. Empty Apple variables break unsigned builds.
 if (process.env.GITHUB_ENV) {
-  for (const name of [
-    "APPLE_CERTIFICATE",
-    "APPLE_CERTIFICATE_PASSWORD",
-    "APPLE_SIGNING_IDENTITY",
-    "APPLE_ID",
-    "APPLE_PASSWORD",
-    "APPLE_TEAM_ID",
-  ]) {
-    const value = process.env[`ZIPSA_${name}`];
-    if (value) {
-      const delimiter = `ZIPSA_${crypto.randomUUID()}`;
-      await appendFile(
-        process.env.GITHUB_ENV,
-        `${name}<<${delimiter}\n${value}\n${delimiter}\n`,
-      );
+  const exportEnv = async (name, value) => {
+    const delimiter = `ZIPSA_${crypto.randomUUID()}`;
+    await appendFile(
+      process.env.GITHUB_ENV,
+      `${name}<<${delimiter}\n${value}\n${delimiter}\n`,
+    );
+  };
+  const hasDeveloperId = Boolean(
+    process.env.ZIPSA_APPLE_CERTIFICATE ||
+    process.env.ZIPSA_APPLE_SIGNING_IDENTITY,
+  );
+  if (process.platform === "darwin" && !hasDeveloperId) {
+    // Gatekeeper reports an unsigned app bundle downloaded from the internet
+    // as "damaged" with no way to open it. An ad-hoc signature seals the whole
+    // bundle, so users see an unverified-developer warning they can allow.
+    // Notarization needs a Developer ID, so its credentials are not exported.
+    await exportEnv("APPLE_SIGNING_IDENTITY", "-");
+    console.log("No Developer ID configured: ad-hoc signing the macOS app.");
+  } else {
+    for (const name of [
+      "APPLE_CERTIFICATE",
+      "APPLE_CERTIFICATE_PASSWORD",
+      "APPLE_SIGNING_IDENTITY",
+      "APPLE_ID",
+      "APPLE_PASSWORD",
+      "APPLE_TEAM_ID",
+    ]) {
+      const value = process.env[`ZIPSA_${name}`];
+      if (value) await exportEnv(name, value);
     }
   }
 }

@@ -72,6 +72,8 @@ macOS 외부 배포의 코드 서명·공증에는 별도의 Apple 개발자 자
 | Secret   | `APPLE_PASSWORD`             | 앱 전용 암호                                 |
 | Variable | `APPLE_TEAM_ID`              | 개발자 팀 ID                                 |
 
+`APPLE_CERTIFICATE`와 `APPLE_SIGNING_IDENTITY`가 모두 없으면 릴리스 워크플로가 macOS 앱을 ad-hoc 서명합니다. 서명하지 않은 앱 번들을 인터넷에서 받으면 macOS가 손상된 앱으로 판단해 열 수 없기 때문입니다. ad-hoc 서명한 앱은 공증되지 않았다는 경고를 표시하고, 사용자가 허용하면 실행됩니다. 공증에는 Developer ID가 필요하므로 이때는 공증 자격 증명을 내보내지 않습니다. 인증서나 서명 이름을 등록하면 ad-hoc 서명 대신 Developer ID로 서명하고, 공증 자격 증명이 있으면 공증합니다. 사용자용 허용 절차는 README의 [처음 실행할 때](../README.md#처음-실행할-때)에 있습니다.
+
 OS의 앱 코드 서명과 공증은 별개입니다. Apple 자격이 없으면 일반 사용자 배포용 공증이 되지 않으며, Windows 코드 서명도 현재 워크플로에 포함하지 않았습니다. 공개 배포 전에 실제 설치 환경에서 OS 서명·권한·알림을 확인해야 합니다. [macOS 서명](https://v2.tauri.app/distribute/sign/macos/), [Windows 서명](https://v2.tauri.app/distribute/sign/windows/).
 
 ## 버전 확인과 다운로드

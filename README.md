@@ -14,7 +14,28 @@
 | macOS · Apple Silicon | [DMG 다운로드](https://github.com/cwon/zipsa/releases/latest/download/Zipsa-macOS-arm64.dmg) |
 | Windows · x64         | [EXE 다운로드](https://github.com/cwon/zipsa/releases/latest/download/Zipsa-Windows-x64.exe) |
 
-위 링크는 항상 최신 정식 릴리스를 가리킵니다. 현재 설치 파일은 macOS 공증과 Windows 코드 서명이 적용되지 않아 운영체제에서 확인 메시지가 표시될 수 있습니다.
+위 링크는 항상 최신 정식 릴리스를 가리킵니다.
+
+## 처음 실행할 때
+
+현재 설치 파일에는 Apple 공증과 Windows 코드 서명이 없습니다. 그래서 처음 실행할 때 운영체제가 경고를 표시합니다. 한 번 허용하면 다음부터는 바로 열립니다.
+
+### macOS
+
+DMG를 열고 Zipsa를 응용 프로그램 폴더로 옮긴 뒤 실행합니다. Apple이 악성 코드 여부를 확인할 수 없다는 경고가 표시되면 다음과 같이 허용합니다.
+
+- **macOS 13·14:** Finder의 응용 프로그램 폴더에서 Zipsa를 Control-클릭하고 **열기**를 선택합니다. 경고 창에서 다시 **열기**를 누릅니다.
+- **macOS 15 이상:** 경고 창을 닫고 **시스템 설정 > 개인정보 보호 및 보안**으로 이동합니다. 보안 항목의 **그래도 열기**를 누르고 암호를 입력합니다.
+
+v0.1.0 설치 파일은 “손상되었기 때문에 열 수 없습니다”라는 메시지가 표시되며 열리지 않습니다. 이후 버전에서는 이 메시지가 표시되지 않습니다. v0.1.0을 사용하려면 터미널에서 다음 명령을 실행한 뒤 다시 엽니다.
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Zipsa.app
+```
+
+### Windows
+
+“Windows의 PC 보호” 창이 표시되면 **추가 정보**를 누른 뒤 **실행**을 누릅니다.
 
 ## 주요 기능
 
