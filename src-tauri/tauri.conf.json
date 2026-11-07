@@ -47,6 +47,5 @@
         "displayLanguageSelector": false
       }
     }
-  },
-  "plugins": { "updater": { "pubkey": "", "endpoints": [] } }
+  }
 }

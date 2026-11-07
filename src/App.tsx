@@ -1,12 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
   isPermissionGranted,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { check, type Update } from "@tauri-apps/plugin-updater";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -20,6 +18,7 @@ import {
   ChevronRight,
   Circle,
   Clock3,
+  ExternalLink,
   FolderPlus,
   HardDrive,
   History,
@@ -55,6 +54,7 @@ import {
   type AppInfo,
   type Editor,
   type Item,
+  type ReleaseCheck,
   type Snapshot,
   type Space,
   type Task,
@@ -157,9 +157,8 @@ export default function App() {
   const [autoStartAvailable, setAutoStartAvailable] = useState(false);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateMessage, setUpdateMessage] = useState("");
-  const [updateVersion, setUpdateVersion] = useState("");
-  const [restartReady, setRestartReady] = useState(false);
-  const update = useRef<Update | null>(null);
+  const [updateError, setUpdateError] = useState(false);
+  const [releaseCheck, setReleaseCheck] = useState<ReleaseCheck | null>(null);
   const theme = useTheme();
 
   async function load() {
@@ -193,7 +192,6 @@ export default function App() {
     const clock = window.setInterval(() => setNow(new Date()), 30_000);
     return () => {
       window.clearInterval(clock);
-      void update.current?.close();
     };
   }, []);
 
@@ -338,49 +336,31 @@ export default function App() {
   }
   async function checkUpdates() {
     setUpdateBusy(true);
-    setUpdateMessage("새 버전을 확인하고 있어요.");
+    setUpdateError(false);
+    setReleaseCheck(null);
+    setUpdateMessage("최신 버전을 확인하고 있어요.");
     try {
-      if (update.current) await update.current.close();
-      update.current = await check();
-      setUpdateVersion(update.current?.version ?? "");
+      const result = await invoke<ReleaseCheck>("check_latest_release");
+      setReleaseCheck(result);
       setUpdateMessage(
-        update.current
-          ? `${update.current.version} 버전이 준비되었어요.`
-          : "최신 버전을 사용하고 있어요.",
+        !result.latestVersion
+          ? "아직 공개된 정식 릴리스가 없어요."
+          : result.updateAvailable
+            ? `v${result.latestVersion} 새 버전이 있어요.`
+            : "새로운 버전이 없어요. 현재 버전을 계속 사용하시면 됩니다.",
       );
     } catch (e) {
-      setUpdateMessage(`업데이트를 확인하지 못했어요. ${String(e)}`);
+      setUpdateError(true);
+      setUpdateMessage(`최신 버전을 확인하지 못했어요. ${String(e)}`);
     } finally {
       setUpdateBusy(false);
     }
   }
-  async function installUpdate() {
-    if (!update.current) return;
-    setUpdateBusy(true);
+  async function openDownloadPage(latest: boolean) {
     try {
-      let total = 0,
-        downloaded = 0;
-      await update.current.downloadAndInstall((event) => {
-        if (event.event === "Started") total = event.data.contentLength ?? 0;
-        if (event.event === "Progress") {
-          downloaded += event.data.chunkLength;
-          setUpdateMessage(
-            total
-              ? `다운로드 중 · ${Math.min(100, Math.round((downloaded / total) * 100))}%`
-              : "다운로드 중…",
-          );
-        }
-        if (event.event === "Finished") setUpdateMessage("설치 중…");
-      });
-      setRestartReady(true);
-      setUpdateMessage("업데이트를 적용하려면 집사를 다시 시작해 주세요.");
-      await update.current.close();
-      update.current = null;
-      setUpdateVersion("");
+      await invoke("open_download_page", { latest });
     } catch (e) {
-      setUpdateMessage(`설치하지 못했어요. ${String(e)}`);
-    } finally {
-      setUpdateBusy(false);
+      notifyError(e);
     }
   }
 
@@ -1495,59 +1475,56 @@ export default function App() {
                     <span className="schedule-tag">v{info?.version}</span>
                   </div>
                   <p className="setting-description">
-                    새 버전을 확인하고 앱에서 바로 설치할 수 있어요.
+                    최신 버전을 확인하고 GitHub 다운로드 페이지로 이동해요.
                   </p>
-                  {!info?.updaterReady ? (
-                    <p className="setting-note">
-                      개발 버전이에요. GitHub 배포 주소와 서명 키를 설정한
-                      빌드부터 업데이트를 사용할 수 있어요.
-                    </p>
-                  ) : (
-                    <>
-                      <p className="field-hint">
-                        버전을 확인하고 설치 파일을 받을 때 GitHub에 연결해요.
-                        공간·아이템·할 일 데이터는 보내지 않아요.
-                      </p>
-                      <div className="setting-actions">
-                        {restartReady ? (
-                          <button
-                            className="button primary"
-                            onClick={() => void relaunch().catch(notifyError)}
-                          >
-                            다시 시작
-                          </button>
-                        ) : (
-                          <>
-                            <button
-                              className="button secondary"
-                              disabled={updateBusy}
-                              onClick={() => void checkUpdates()}
-                            >
-                              <RefreshCw
-                                size={16}
-                                className={updateBusy ? "spin" : ""}
-                              />
-                              새 버전 확인
-                            </button>
-                            {updateVersion && (
-                              <button
-                                className="button primary"
-                                disabled={updateBusy}
-                                onClick={() => void installUpdate()}
-                              >
-                                v{updateVersion} 설치
-                              </button>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    </>
-                  )}
+                  <p className="field-hint">
+                    확인할 때 GitHub에 연결해요. 공간·아이템·할 일 데이터는
+                    전송하지 않아요.
+                  </p>
+                  <div className="setting-actions">
+                    <button
+                      className="button secondary"
+                      disabled={updateBusy}
+                      onClick={() => void checkUpdates()}
+                    >
+                      <RefreshCw
+                        size={16}
+                        className={updateBusy ? "spin" : ""}
+                      />
+                      최신 버전 확인
+                    </button>
+                    {releaseCheck?.updateAvailable && (
+                      <button
+                        className="button primary"
+                        disabled={updateBusy}
+                        onClick={() => void openDownloadPage(true)}
+                      >
+                        <ExternalLink size={16} />
+                        다운로드 페이지로 이동
+                      </button>
+                    )}
+                  </div>
                   {updateMessage && (
-                    <p className="update-message" role="status">
+                    <p
+                      className={`update-message ${updateError ? "error" : ""}`}
+                      role={updateError ? "alert" : "status"}
+                    >
                       {updateMessage}
                     </p>
                   )}
+                  {releaseCheck?.updateAvailable && releaseCheck.notes && (
+                    <div className="release-notes">
+                      <strong>변경 내용</strong>
+                      <p>{releaseCheck.notes}</p>
+                    </div>
+                  )}
+                  <button
+                    className="text-button release-link"
+                    onClick={() => void openDownloadPage(false)}
+                  >
+                    GitHub 릴리스 보기
+                    <ExternalLink size={13} />
+                  </button>
                 </section>
                 <div className="app-signature">
                   <House size={20} />

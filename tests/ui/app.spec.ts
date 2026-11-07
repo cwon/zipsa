@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import type { Snapshot, Task } from "../../src/types";
+import type { ReleaseCheck, Snapshot, Task } from "../../src/types";
 
 const empty: Snapshot = {
   spaces: [],
@@ -16,14 +16,20 @@ const home = {
   notes: "나의 편안한 공간",
 };
 
-async function mockDesktop(page: Page, initial: Snapshot = empty) {
+async function mockDesktop(
+  page: Page,
+  initial: Snapshot = empty,
+  update: { result?: ReleaseCheck; error?: string } = {},
+) {
   await page.addInitScript(
-    ({ initial }) => {
+    ({ initial, update }) => {
       const state = structuredClone(initial);
       const nativeThemes: (string | null)[] = [];
+      const updateRequests = { checks: 0, pages: [] as boolean[] };
       Object.assign(window, {
         isTauri: true,
         __nativeThemes: nativeThemes,
+        __updates: updateRequests,
         __TAURI_INTERNALS__: {
           metadata: {
             currentWindow: { label: "main" },
@@ -35,11 +41,25 @@ async function mockDesktop(page: Page, initial: Snapshot = empty) {
               return {
                 version: "0.1.0",
                 dataPath: "/local/Zipsa",
-                updaterReady: false,
               };
             if (command === "plugin:autostart|is_enabled") return false;
             if (command === "plugin:window|set_theme") {
               nativeThemes.push(args.value);
+              return null;
+            }
+            if (command === "check_latest_release") {
+              updateRequests.checks += 1;
+              if (update.error) throw update.error;
+              return (
+                update.result ?? {
+                  latestVersion: null,
+                  updateAvailable: false,
+                  notes: null,
+                }
+              );
+            }
+            if (command === "open_download_page") {
+              updateRequests.pages.push(args.latest);
               return null;
             }
             if (command.startsWith("save_") && command !== "save_settings") {
@@ -93,7 +113,7 @@ async function mockDesktop(page: Page, initial: Snapshot = empty) {
         },
       });
     },
-    { initial },
+    { initial, update },
   );
 }
 
@@ -419,4 +439,103 @@ test("deletes a pending task directly from the task list", async ({ page }) => {
   await expect(
     page.getByText("등록된 할 일이 없어요.", { exact: true }),
   ).toBeVisible();
+});
+
+async function updateRequests(page: Page) {
+  return page.evaluate(
+    () =>
+      (window as unknown as { __updates: { checks: number; pages: boolean[] } })
+        .__updates,
+  );
+}
+
+test("checks on demand and opens the new release page only after the download button is clicked", async ({
+  page,
+}) => {
+  await mockDesktop(page, empty, {
+    result: {
+      latestVersion: "0.2.0",
+      updateAvailable: true,
+      notes: "공간 검색 개선\n사진 관리 개선",
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /^설정/ }).click();
+  expect(await updateRequests(page)).toEqual({ checks: 0, pages: [] });
+  await page
+    .getByRole("button", { name: "최신 버전 확인", exact: true })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "v0.2.0 새 버전이 있어요.",
+  );
+  await expect(page.locator(".release-notes")).toContainText("공간 검색 개선");
+  expect(await updateRequests(page)).toEqual({ checks: 1, pages: [] });
+  await expect(
+    page.getByRole("button", { name: /설치|다시 시작/ }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "다운로드 페이지로 이동", exact: true })
+    .click();
+  expect(await updateRequests(page)).toEqual({ checks: 1, pages: [true] });
+});
+
+test("does not offer an update when the installed version is current", async ({
+  page,
+}) => {
+  await mockDesktop(page, empty, {
+    result: { latestVersion: "0.1.0", updateAvailable: false, notes: null },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /^설정/ }).click();
+  await page
+    .getByRole("button", { name: "최신 버전 확인", exact: true })
+    .click();
+  await expect(page.getByRole("status")).toContainText("새로운 버전이 없어요.");
+  await expect(
+    page.getByRole("button", { name: "다운로드 페이지로 이동", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("explains that no release has been published and still offers the release list", async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: /^설정/ }).click();
+  await page
+    .getByRole("button", { name: "최신 버전 확인", exact: true })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "아직 공개된 정식 릴리스가 없어요.",
+  );
+  await page
+    .getByRole("button", { name: "GitHub 릴리스 보기", exact: true })
+    .click();
+  expect((await updateRequests(page)).pages).toEqual([false]);
+});
+
+test("allows retry and direct release-page navigation after a failed version check", async ({
+  page,
+}) => {
+  await mockDesktop(page, empty, { error: "GitHub 요청이 제한되었어요." });
+  await page.goto("/");
+  await page.getByRole("button", { name: /^설정/ }).click();
+  const button = page.getByRole("button", {
+    name: "최신 버전 확인",
+    exact: true,
+  });
+  await button.click();
+  await expect(page.getByRole("alert")).toContainText(
+    "GitHub 요청이 제한되었어요.",
+  );
+  await expect(button).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "다운로드 페이지로 이동", exact: true }),
+  ).toHaveCount(0);
+  await button.click();
+  await expect.poll(async () => (await updateRequests(page)).checks).toBe(2);
+  await page
+    .getByRole("button", { name: "GitHub 릴리스 보기", exact: true })
+    .click();
+  expect((await updateRequests(page)).pages).toEqual([false]);
 });

@@ -1,6 +1,7 @@
 mod models;
 mod schedule;
 mod store;
+mod updates;
 
 use std::{
     fs,
@@ -20,6 +21,7 @@ use tauri::{
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_opener::OpenerExt;
 
 type Db = Mutex<store::Store>;
 type Result<T> = std::result::Result<T, String>;
@@ -34,21 +36,10 @@ fn lock(db: &Db) -> Result<std::sync::MutexGuard<'_, store::Store>> {
 struct AppInfo {
     version: String,
     data_path: String,
-    updater_ready: bool,
 }
 
 #[tauri::command]
 fn app_info(app: tauri::AppHandle) -> Result<AppInfo> {
-    let config = app.config();
-    let updater = config.plugins.0.get("updater");
-    let updater_ready = updater.is_some_and(|v| {
-        v.get("pubkey")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty())
-            && v.get("endpoints")
-                .and_then(|v| v.as_array())
-                .is_some_and(|a| !a.is_empty())
-    });
     Ok(AppInfo {
         version: app.package_info().version.to_string(),
         data_path: app
@@ -57,8 +48,27 @@ fn app_info(app: tauri::AppHandle) -> Result<AppInfo> {
             .map_err(|e| e.to_string())?
             .display()
             .to_string(),
-        updater_ready,
     })
+}
+
+#[tauri::command]
+async fn check_latest_release(app: tauri::AppHandle) -> Result<updates::ReleaseCheck> {
+    updates::check(&app.package_info().version.to_string()).await
+}
+
+#[tauri::command]
+fn open_download_page(app: tauri::AppHandle, latest: bool) -> Result<()> {
+    // Only fixed project URLs can be opened; no URL is accepted from the webview.
+    app.opener()
+        .open_url(
+            if latest {
+                updates::LATEST_RELEASE_PAGE
+            } else {
+                updates::RELEASES_PAGE
+            },
+            None::<&str>,
+        )
+        .map_err(|_| "브라우저를 열지 못했어요. 기본 브라우저 설정을 확인해 주세요.".to_string())
 }
 
 #[tauri::command]
@@ -239,14 +249,15 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--background"]),
         ))
         .invoke_handler(tauri::generate_handler![
             app_info,
+            check_latest_release,
+            open_download_page,
             load_data,
             save_space,
             save_item,

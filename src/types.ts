@@ -53,7 +53,11 @@ export interface Snapshot {
 export interface AppInfo {
   version: string;
   dataPath: string;
-  updaterReady: boolean;
+}
+export interface ReleaseCheck {
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  notes: string | null;
 }
 export type Editor =
   | {

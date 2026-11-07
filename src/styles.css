@@ -1484,6 +1484,29 @@ button.tree-chevron:hover {
   margin-top: 14px;
   overflow-wrap: anywhere;
 }
+.release-notes {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12px;
+}
+.update-message.error {
+  color: var(--danger-text);
+}
+.release-notes p {
+  margin-top: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.8;
+  color: var(--text-2);
+}
+.release-link {
+  margin-top: 14px;
+}
 .app-signature {
   display: flex;
   align-items: center;

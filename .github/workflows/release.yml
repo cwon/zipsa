@@ -15,7 +15,7 @@ jobs:
   build:
     strategy:
       fail-fast: false
-      # Serialize uploads so latest.json contains every platform before publishing.
+      # Avoid concurrent creation of the same draft release.
       max-parallel: 1
       matrix:
         include:
@@ -41,11 +41,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
-      - name: Configure signed updater
+      - name: Validate version and configure optional app signing
         run: node scripts/prepare-release.mjs
         env:
-          TAURI_SIGNING_PUBLIC_KEY: ${{ vars.TAURI_SIGNING_PUBLIC_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           ZIPSA_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           ZIPSA_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           ZIPSA_APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
@@ -55,16 +53,16 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "집사 · Zipsa ${{ github.ref_name }}"
           releaseBody: "집사 설치 파일입니다. macOS는 DMG, Windows는 설치 EXE를 내려받아 주세요."
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: true
-          args: --target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }}
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+          generateReleaseNotes: true
+          args: --target ${{ matrix.target }} --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }}
 
   publish:
     needs: build
@@ -80,16 +78,14 @@ jobs:
             const release = releases.find(r => r.tag_name === tag);
             if (!release) throw new Error('빌드된 릴리스를 찾을 수 없습니다.');
             const { data: assets } = await github.rest.repos.listReleaseAssets({ owner, repo, release_id: release.id, per_page: 100 });
-            const asset = assets.find(a => a.name === 'latest.json');
-            if (!asset) throw new Error('업데이트 매니페스트가 없습니다.');
-            const response = await github.rest.repos.getReleaseAsset({ owner, repo, asset_id: asset.id, headers: { accept: 'application/octet-stream' } });
-            const raw = response.data;
-            const manifest = typeof raw === 'string' ? JSON.parse(raw) : raw instanceof ArrayBuffer ? JSON.parse(Buffer.from(raw).toString('utf8')) : raw;
-            if (manifest.version.replace(/^v/, '') !== tag.slice(1)) throw new Error('업데이트 버전이 태그와 다릅니다.');
-            for (const platform of ['darwin-aarch64', 'darwin-x86_64', 'windows-x86_64']) {
-              const entry = manifest.platforms?.[platform];
-              if (!entry?.signature || !entry?.url?.startsWith(`https://github.com/${owner}/${repo}/releases/download/`)) {
-                throw new Error(`업데이트 파일이 완성되지 않았습니다: ${platform}`);
+            const required = [
+              ['Apple Silicon Mac', /_aarch64\.dmg$/i],
+              ['Intel Mac', /_x64\.dmg$/i],
+              ['Windows x64', /_x64-setup\.exe$/i],
+            ];
+            for (const [platform, pattern] of required) {
+              if (!assets.some(asset => pattern.test(asset.name) && asset.state === 'uploaded' && asset.size > 0)) {
+                throw new Error(`설치 파일이 완성되지 않았습니다: ${platform}`);
               }
             }
             await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, draft: false, make_latest: 'true' });
