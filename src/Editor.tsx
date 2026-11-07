@@ -1,9 +1,10 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { ImagePlus, Info, Trash2, X } from "lucide-react";
+import { ImagePlus, Info, Maximize2, Trash2, X } from "lucide-react";
 import type { Editor, Item, Snapshot, Space, Task } from "./types";
 import {
   dateTime,
   localInput,
+  photoSrc,
   reminderOptions,
   reminderTime,
   spacePath,
@@ -35,6 +36,9 @@ export function Modal({
       aria-labelledby={titleId}
       onCancel={(e) => {
         e.preventDefault();
+        // React는 cancel 이벤트를 상위 컴포넌트로 전달하므로, 사진 보기처럼
+        // 겹쳐 연 창에서 Esc를 눌러도 아래 창까지 닫히지 않게 막는다.
+        e.stopPropagation();
         onClose();
       }}
     >
@@ -102,6 +106,7 @@ export default function EntityEditor({
     editor.kind === "item" ? (editor.value?.photo ?? null) : null,
   );
   const [photoBusy, setPhotoBusy] = useState(false);
+  const [viewingPhoto, setViewingPhoto] = useState(false);
   const [mode, setMode] = useState(
     editor.kind === "task" ? (editor.value?.mode ?? "once") : "once",
   );
@@ -305,10 +310,21 @@ export default function EntityEditor({
           )}
           {editor.kind === "item" && (
             <>
-              <div className="photo-picker">
+              <div className={`photo-picker ${photo ? "has-photo" : ""}`}>
                 {photo ? (
                   <>
-                    <img src={photo} alt="아이템 사진" />
+                    <button
+                      type="button"
+                      className="photo-preview"
+                      aria-label="사진 크게 보기"
+                      onClick={() => setViewingPhoto(true)}
+                    >
+                      <img src={photoSrc(photo)} alt="아이템 사진" />
+                      <span className="photo-zoom" aria-hidden="true">
+                        <Maximize2 size={13} />
+                        크게 보기
+                      </span>
+                    </button>
                     <button
                       type="button"
                       className="icon-button photo-remove"
@@ -347,6 +363,15 @@ export default function EntityEditor({
                   />
                 </label>
               </div>
+              {viewingPhoto && photo && (
+                <Modal
+                  title={editor.value?.name || "아이템 사진"}
+                  className="photo-viewer"
+                  onClose={() => setViewingPhoto(false)}
+                >
+                  <img src={photoSrc(photo)} alt="아이템 사진 원본" />
+                </Modal>
+              )}
               <label>
                 아이템 이름
                 <input

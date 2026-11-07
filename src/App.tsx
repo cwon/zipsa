@@ -18,6 +18,7 @@ import {
   Circle,
   Clock3,
   ExternalLink,
+  FolderOpen,
   FolderPlus,
   HardDrive,
   History,
@@ -46,11 +47,13 @@ import {
   dateTime,
   expiryLabel,
   localDate,
+  photoSrc,
   reminderLabel,
   scheduleLabel,
   spacePath,
   taskTarget,
   type AppInfo,
+  type AutoBackupStatus,
   type Editor,
   type Item,
   type ReleaseCheck,
@@ -186,6 +189,7 @@ export default function App() {
     null,
   );
   const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [autoBackup, setAutoBackup] = useState<AutoBackupStatus | null>(null);
   const theme = useTheme();
 
   async function load() {
@@ -233,6 +237,20 @@ export default function App() {
       window.clearInterval(clock);
     };
   }, []);
+
+  useEffect(() => {
+    if (page !== "settings" || !isTauri()) return;
+    let active = true;
+    void invoke<AutoBackupStatus>("auto_backup_status")
+      .then((status) => {
+        if (active) setAutoBackup(status);
+      })
+      // 상태를 읽지 못해도 백업 버튼은 그대로 쓸 수 있다.
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [page]);
 
   const notifyError = (e: unknown) =>
     setNotice({ text: String(e), error: true });
@@ -371,6 +389,13 @@ export default function App() {
       notifyError(e);
     } finally {
       setBusy(false);
+    }
+  }
+  async function openBackupFolder() {
+    try {
+      await invoke("open_backup_folder");
+    } catch (e) {
+      notifyError(e);
     }
   }
   async function checkUpdates() {
@@ -640,7 +665,11 @@ export default function App() {
             >
               <div className={`item-image ${item.photo ? "" : "no-image"}`}>
                 {item.photo ? (
-                  <img src={item.photo} alt={item.name} loading="lazy" />
+                  <img
+                    src={photoSrc(item.photo)}
+                    alt={item.name}
+                    loading="lazy"
+                  />
                 ) : (
                   <Package size={38} strokeWidth={1.15} />
                 )}
@@ -1068,7 +1097,7 @@ export default function App() {
                             >
                               <span className="expiry-mini">
                                 {i.photo ? (
-                                  <img src={i.photo} alt="" />
+                                  <img src={photoSrc(i.photo)} alt="" />
                                 ) : (
                                   <Package size={20} />
                                 )}
@@ -1520,6 +1549,30 @@ export default function App() {
                   <p className="field-hint">
                     앱 잠금과 별도 암호화는 사용하지 않아요. 백업에는
                     사진·일정·수행 기록이 함께 포함돼요.
+                  </p>
+                  <div className="setting-row auto-backup-row">
+                    <div>
+                      <strong>자동 백업</strong>
+                      <p>
+                        {autoBackup?.lastAt
+                          ? `마지막 백업 ${dateTime(autoBackup.lastAt)} · ${autoBackup.count}개 보관 중`
+                          : "아직 자동 백업이 없어요."}{" "}
+                        내용이 바뀐 날 하루 한 번, 최근 {autoBackup?.keep ?? 7}
+                        개까지 이 컴퓨터에 보관해요.
+                      </p>
+                    </div>
+                    <button
+                      className="button secondary"
+                      onClick={() => void openBackupFolder()}
+                    >
+                      <FolderOpen size={16} />
+                      백업 폴더 열기
+                    </button>
+                  </div>
+                  <p className="field-hint">
+                    자동 백업은 이 컴퓨터 안에만 있어요. 컴퓨터 고장에
+                    대비하려면 가끔 ‘백업 내보내기’로 다른 저장 장치에 보관해
+                    주세요. 복원할 때는 자동 백업 폴더가 먼저 열려요.
                   </p>
                   <div className="setting-actions">
                     <button

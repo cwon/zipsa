@@ -1,3 +1,5 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
+
 export interface Space {
   id: string;
   parentId: string | null;
@@ -12,6 +14,7 @@ export interface Item {
   quantity: number;
   unit: string;
   notes: string;
+  /** 저장된 사진의 식별자. 새로 고른 사진은 저장할 때까지 data URL로 둔다. */
   photo: string | null;
   expiresOn: string | null;
   purchasedOn: string | null;
@@ -68,6 +71,11 @@ export interface AppInfo {
   os: string;
   feedbackAvailable: boolean;
 }
+export interface AutoBackupStatus {
+  lastAt: string | null;
+  count: number;
+  keep: number;
+}
 export interface ReleaseCheck {
   latestVersion: string | null;
   updateAvailable: boolean;
@@ -110,6 +118,16 @@ export function reminderTime(
   if (!minutes) return null;
   const at = Date.parse(dueAt) - minutes * 60_000;
   return Number.isFinite(at) ? new Date(at).toISOString() : null;
+}
+
+/** 저장된 사진은 앱 전용 주소로 불러오고, 새로 고른 사진은 그대로 보여 준다. */
+export function photoSrc(photo: string) {
+  if (photo.startsWith("data:")) return photo;
+  try {
+    return convertFileSrc(photo, "zipsa-photo");
+  } catch {
+    return "";
+  }
 }
 
 export function spacePath(spaces: Space[], id: string): string {

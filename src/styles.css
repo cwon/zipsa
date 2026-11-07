@@ -1490,6 +1490,13 @@ button.tree-chevron:hover {
 .panel > .setting-description {
   margin-top: 14px;
 }
+.auto-backup-row {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.auto-backup-row .button {
+  flex-shrink: 0;
+}
 .switch {
   width: 44px;
   height: 24px;
@@ -1982,6 +1989,58 @@ fieldset > p.field-hint {
   width: 100px;
   height: 100px;
   object-fit: cover;
+}
+/* 사진이 있으면 자르지 않고 전체를 크게 보여 준다. */
+.photo-picker.has-photo {
+  height: 280px;
+  border: 1px solid var(--line);
+}
+.photo-preview {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+.photo-picker .photo-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.photo-preview:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+.photo-zoom {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  background: var(--ink);
+  color: var(--ink-fg);
+  font-size: 12px;
+  font-weight: 600;
+}
+.photo-picker.has-photo .photo-label {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+}
+.modal.photo-viewer {
+  width: auto;
+  max-width: calc(100vw - 40px);
+}
+.photo-viewer img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 170px);
+  margin: 0 auto;
+  object-fit: contain;
 }
 .photo-label {
   font-size: 13px;

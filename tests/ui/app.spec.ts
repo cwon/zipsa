@@ -41,6 +41,7 @@ async function mockDesktop(
       const calendarRequests: { start: string; end: string }[] = [];
       const calendarCompleted: number[] = [];
       const savedTasks: Task[] = [];
+      const backupFolderOpens: number[] = [];
       Object.assign(window, {
         isTauri: true,
         __nativeThemes: nativeThemes,
@@ -49,11 +50,14 @@ async function mockDesktop(
         __calendarRequests: calendarRequests,
         __calendarCompleted: calendarCompleted,
         __savedTasks: savedTasks,
+        __backupFolderOpens: backupFolderOpens,
         __TAURI_INTERNALS__: {
           metadata: {
             currentWindow: { label: "main" },
             currentWebview: { windowLabel: "main", label: "main" },
           },
+          convertFileSrc: (path: string, protocol: string) =>
+            `${protocol}://localhost/${encodeURIComponent(path)}`,
           invoke: async (command: string, args: Record<string, any> = {}) => {
             if (command === "load_data") return structuredClone(state);
             if (command === "calendar_events") {
@@ -131,6 +135,16 @@ async function mockDesktop(
                   notes: null,
                 }
               );
+            }
+            if (command === "auto_backup_status")
+              return {
+                lastAt: "2026-11-08T09:30:00+09:00",
+                count: 3,
+                keep: 7,
+              };
+            if (command === "open_backup_folder") {
+              backupFolderOpens.push(1);
+              return null;
             }
             if (command === "open_download_page") {
               updateRequests.pages.push(args.latest);
@@ -267,6 +281,63 @@ test("saves a photo and purchase details, binds an item task, and shows history"
   await page.getByRole("button", { name: "수행 기록", exact: true }).click();
   await expect(page.getByText("우유 확인하기", { exact: true })).toBeVisible();
   await expect(page.getByText("완료", { exact: true })).toBeVisible();
+});
+
+test("loads stored photos by id and shows automatic backups", async ({
+  page,
+}) => {
+  await mockDesktop(page, {
+    ...empty,
+    spaces: [home],
+    items: [
+      {
+        id: "cup",
+        spaceId: "home",
+        name: "컵",
+        quantity: 1,
+        unit: "개",
+        notes: "",
+        photo: "photo-1",
+        expiresOn: null,
+        purchasedOn: null,
+        purchaseStore: "",
+        purchasePrice: null,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "모든 아이템", exact: true }).click();
+  await expect(
+    page.getByRole("img", { name: "컵", exact: true }),
+  ).toHaveAttribute("src", "zipsa-photo://localhost/photo-1");
+  await page.getByRole("button", { name: /^컵/ }).click();
+  const editor = page.getByRole("dialog", { name: "아이템 수정" });
+  await editor.getByRole("button", { name: "사진 크게 보기" }).click();
+  const viewer = page.getByRole("dialog", { name: "컵" });
+  await expect(
+    viewer.getByRole("img", { name: "아이템 사진 원본" }),
+  ).toHaveAttribute("src", "zipsa-photo://localhost/photo-1");
+  await page.keyboard.press("Escape");
+  await expect(viewer).toBeHidden();
+  await expect(editor).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(editor).toBeHidden();
+  await page.getByRole("button", { name: /^설정/ }).click();
+  await expect(
+    page.getByText("마지막 백업 11월 8일 오전 09:30 · 3개 보관 중", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "백업 폴더 열기" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __backupFolderOpens: number[] })
+            .__backupFolderOpens.length,
+      ),
+    )
+    .toBe(1);
 });
 
 test("keeps notification disabled when OS permission is denied", async ({

@@ -1,10 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     path::Path,
 };
 
-use chrono::{DateTime, Duration, NaiveDate, Utc};
-use rusqlite::{params, Connection};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use uuid::Uuid;
 
@@ -15,8 +17,158 @@ use crate::{
 
 type Result<T> = std::result::Result<T, String>;
 
+/// v2 moved item photos out of the item JSON into the `photos` table, so
+/// saving or listing data never reads or sends photo bytes.
+pub const SCHEMA_VERSION: u32 = 2;
+/// Marks SQLite files written by Zipsa ("ZIPS") so a restore can reject other databases.
+const APPLICATION_ID: i32 = 0x5A49_5053;
+const PHOTO_MAX_BYTES: usize = 3 * 1024 * 1024;
+const PHOTO_ERROR: &str = "사진은 3MB 이하의 JPEG·PNG·WebP 형식이어야 합니다.";
+const PHOTO_TYPES: [(&str, &str); 3] = [
+    ("image/jpeg", "data:image/jpeg;base64,"),
+    ("image/png", "data:image/png;base64,"),
+    ("image/webp", "data:image/webp;base64,"),
+];
+const INVALID_BACKUP: &str =
+    "집사 백업 파일을 읽지 못했습니다. 올바른 .zipsa 파일인지 확인해 주세요.";
+const MISSING_PHOTO: &str = "백업에서 일부 사진을 찾을 수 없습니다.";
+
+const SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS spaces (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES spaces(id) DEFERRABLE INITIALLY DEFERRED, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id), data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, space_id TEXT REFERENCES spaces(id), item_id TEXT REFERENCES items(id), data TEXT NOT NULL, CHECK ((space_id IS NULL) != (item_id IS NULL)));
+    CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, item_id TEXT NOT NULL UNIQUE REFERENCES items(id) ON DELETE CASCADE, mime TEXT NOT NULL, data BLOB NOT NULL);
+    CREATE INDEX IF NOT EXISTS spaces_parent ON spaces(parent_id);
+    CREATE INDEX IF NOT EXISTS items_space ON items(space_id);
+    CREATE INDEX IF NOT EXISTS tasks_space ON tasks(space_id);
+    CREATE INDEX IF NOT EXISTS tasks_item ON tasks(item_id);";
+
 pub struct Store {
     pub conn: Connection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Photo {
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+impl Photo {
+    /// Decodes a photo picked in the editor (`data:image/...;base64,...`).
+    pub fn from_data_url(url: &str) -> Result<Self> {
+        let (mime, encoded) = PHOTO_TYPES
+            .iter()
+            .find_map(|(mime, prefix)| url.strip_prefix(prefix).map(|rest| (*mime, rest)))
+            .ok_or(PHOTO_ERROR)?;
+        if encoded.len() > PHOTO_MAX_BYTES.div_ceil(3) * 4 {
+            return Err(PHOTO_ERROR.into());
+        }
+        let photo = Self {
+            mime: mime.into(),
+            data: STANDARD.decode(encoded).map_err(|_| PHOTO_ERROR)?,
+        };
+        photo.check()?;
+        Ok(photo)
+    }
+
+    fn check(&self) -> Result<()> {
+        let d = &self.data;
+        let signature = match self.mime.as_str() {
+            "image/jpeg" => d.starts_with(&[0xFF, 0xD8, 0xFF]),
+            "image/png" => d.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "image/webp" => d.len() >= 12 && d.starts_with(b"RIFF") && &d[8..12] == b"WEBP",
+            _ => false,
+        };
+        if !signature || d.len() > PHOTO_MAX_BYTES {
+            return Err(PHOTO_ERROR.into());
+        }
+        Ok(())
+    }
+}
+
+fn err(e: impl ToString) -> String {
+    e.to_string()
+}
+
+fn user_version(conn: &Connection) -> Result<u32> {
+    conn.pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(err)
+}
+
+fn insert_photo(conn: &Connection, id: &str, item_id: &str, photo: &Photo) -> Result<()> {
+    conn.execute(
+        "INSERT INTO photos (id,item_id,mime,data) VALUES (?1,?2,?3,?4)",
+        params![id, item_id, photo.mime, photo.data],
+    )
+    .map(|_| ())
+    .map_err(err)
+}
+
+/// Counts user edits so automatic backups can skip unchanged data.
+/// Notification bookkeeping is not an edit and does not call this.
+fn touch(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO metadata (key,data) VALUES ('revision','1') ON CONFLICT(key) DO UPDATE SET data = CAST(data AS INTEGER) + 1",
+        [],
+    )
+    .map(|_| ())
+    .map_err(err)
+}
+
+/// v1 stored each photo as a data URL inside the item JSON.
+fn move_inline_photos(conn: &Connection) -> Result<()> {
+    let items: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT id, data FROM items").map_err(err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(err)?;
+        rows.collect::<rusqlite::Result<_>>().map_err(err)?
+    };
+    for (id, data) in items {
+        let mut item: Item = serde_json::from_str(&data).map_err(err)?;
+        let Some(url) = item.photo.take() else {
+            continue;
+        };
+        // A photo that would fail validation is dropped instead of blocking
+        // the upgrade. The pre-upgrade backup still contains it.
+        if let Ok(photo) = Photo::from_data_url(&url) {
+            let photo_id = Uuid::new_v4().to_string();
+            insert_photo(conn, &photo_id, &id, &photo)?;
+            item.photo = Some(photo_id);
+        }
+        conn.execute(
+            "UPDATE items SET data=?2 WHERE id=?1",
+            params![id, json(&item)?],
+        )
+        .map_err(err)?;
+    }
+    Ok(())
+}
+
+/// Writes a consistent copy of the whole database, photos included.
+fn backup_connection(conn: &Connection, dest: &Path) -> Result<()> {
+    let fail = |e: String| format!("백업 파일을 만들지 못했습니다. {e}");
+    let parent = dest.parent().ok_or("백업 경로가 올바르지 않습니다.")?;
+    // VACUUM INTO needs a file that does not exist yet. Renaming the finished
+    // copy means a crash never leaves a partial file under the final name.
+    let staging = tempfile::Builder::new()
+        .prefix(".zipsa-backup-")
+        .tempdir_in(parent)
+        .map_err(|e| fail(e.to_string()))?;
+    let file = staging.path().join("backup.zipsa");
+    let target = file
+        .to_str()
+        .ok_or("백업 경로에 사용할 수 없는 문자가 있습니다.")?;
+    conn.execute("VACUUM INTO ?1", [target])
+        .map_err(|e| fail(e.to_string()))?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&file)
+        .and_then(|f| f.sync_all())
+        .and_then(|_| fs::rename(&file, dest))
+        .map_err(|e| fail(e.to_string()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +222,7 @@ pub fn validate(data: &Snapshot) -> Result<()> {
     unique_ids(data.records.iter().map(|s| &s.id))?;
     let spaces: HashMap<_, _> = data.spaces.iter().map(|s| (s.id.as_str(), s)).collect();
     let items: HashSet<_> = data.items.iter().map(|s| s.id.as_str()).collect();
+    let mut photos = HashSet::new();
     for s in &data.spaces {
         text(&s.name, "공간 이름", true, 100)?;
         text(&s.notes, "메모", false, 10_000)?;
@@ -102,17 +255,14 @@ pub fn validate(data: &Snapshot) -> Result<()> {
         }
         date(&i.expires_on)?;
         date(&i.purchased_on)?;
+        // Stored items refer to a row in `photos`; the bytes are checked when written.
         if let Some(photo) = &i.photo {
-            if photo.len() > 4 * 1024 * 1024
-                || ![
-                    "data:image/jpeg;base64,",
-                    "data:image/png;base64,",
-                    "data:image/webp;base64,",
-                ]
-                .iter()
-                .any(|prefix| photo.starts_with(prefix))
+            if photo.is_empty()
+                || photo.len() > 100
+                || photo.starts_with("data:")
+                || !photos.insert(photo.as_str())
             {
-                return Err("사진은 4MB 이하의 JPEG·PNG·WebP 형식이어야 합니다.".into());
+                return Err("아이템 사진 정보가 올바르지 않습니다.".into());
             }
         }
     }
@@ -172,28 +322,151 @@ fn json<T: Serialize>(v: &T) -> Result<String> {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        Self::from_connection(Connection::open(path).map_err(|e| e.to_string())?)
+        let conn = Connection::open(path).map_err(err)?;
+        let version = user_version(&conn)?;
+        if (1..SCHEMA_VERSION).contains(&version) {
+            // Keep the data restorable as it was before converting it.
+            let dir = path
+                .parent()
+                .ok_or("데이터 경로가 올바르지 않습니다.")?
+                .join("backups");
+            fs::create_dir_all(&dir).map_err(err)?;
+            let name = format!(
+                "before-upgrade-v{version}-{}.zipsa",
+                Local::now().format("%Y%m%d-%H%M%S")
+            );
+            backup_connection(&conn, &dir.join(name))?;
+        }
+        Self::from_connection(conn)
     }
 
     pub fn from_connection(conn: Connection) -> Result<Self> {
-        let version: u32 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(|e| e.to_string())?;
-        if version > 1 {
+        let version = user_version(&conn)?;
+        if version > SCHEMA_VERSION {
             return Err("더 최신 버전의 집사로 만든 데이터입니다. 앱을 업데이트해 주세요.".into());
         }
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;
-            CREATE TABLE IF NOT EXISTS spaces (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES spaces(id) DEFERRABLE INITIALLY DEFERRED, data TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id), data TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, space_id TEXT REFERENCES spaces(id), item_id TEXT REFERENCES items(id), data TEXT NOT NULL, CHECK ((space_id IS NULL) != (item_id IS NULL)));
-            CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, data TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS spaces_parent ON spaces(parent_id);
-            CREATE INDEX IF NOT EXISTS items_space ON items(space_id);
-            CREATE INDEX IF NOT EXISTS tasks_space ON tasks(space_id);
-            CREATE INDEX IF NOT EXISTS tasks_item ON tasks(item_id);
-            PRAGMA user_version = 1;") .map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;",
+        )
+        .map_err(err)?;
+        if version < SCHEMA_VERSION {
+            let tx = conn.unchecked_transaction().map_err(err)?;
+            tx.execute_batch(SCHEMA).map_err(err)?;
+            if version == 1 {
+                move_inline_photos(&tx)?;
+            }
+            tx.execute_batch(&format!(
+                "PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {SCHEMA_VERSION};"
+            ))
+            .map_err(err)?;
+            tx.commit().map_err(err)?;
+        }
         Ok(Self { conn })
+    }
+
+    /// Opens a private copy of a `.zipsa` database backup and upgrades it to
+    /// the current schema. The copy must not be the user's chosen file.
+    pub fn open_backup_copy(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path).map_err(|_| INVALID_BACKUP)?;
+        // The file comes from outside the app, so its schema may not call
+        // functions with side effects.
+        conn.pragma_update(None, "trusted_schema", false)
+            .map_err(err)?;
+        let check: String = conn
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .map_err(|_| INVALID_BACKUP)?;
+        let app_id: i32 = conn
+            .pragma_query_value(None, "application_id", |r| r.get(0))
+            .map_err(|_| INVALID_BACKUP)?;
+        let version = user_version(&conn).map_err(|_| INVALID_BACKUP)?;
+        let tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('spaces','items','tasks','records','metadata')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|_| INVALID_BACKUP)?;
+        // v1 files predate the application id.
+        let zipsa = tables == 5 && (app_id == APPLICATION_ID || (app_id == 0 && version == 1));
+        if check != "ok" || !zipsa {
+            return Err(INVALID_BACKUP.into());
+        }
+        Self::from_connection(conn)
+    }
+
+    /// Loads a JSON backup from v0.2.0 or earlier, whose photos are data URLs.
+    pub fn from_legacy(mut data: Snapshot) -> Result<Self> {
+        let mut photos = HashMap::new();
+        for item in &mut data.items {
+            if let Some(url) = item.photo.take() {
+                let id = Uuid::new_v4().to_string();
+                photos.insert(id.clone(), Photo::from_data_url(&url)?);
+                item.photo = Some(id);
+            }
+        }
+        let mut store = Self::from_connection(Connection::open_in_memory().map_err(err)?)?;
+        store.replace_all(&data, |id| photos.remove(id).ok_or(MISSING_PHOTO.into()))?;
+        Ok(store)
+    }
+
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        backup_connection(&self.conn, dest)
+    }
+
+    pub fn photo(&self, id: &str) -> Result<Option<Photo>> {
+        self.conn
+            .query_row("SELECT mime, data FROM photos WHERE id = ?1", [id], |r| {
+                Ok(Photo {
+                    mime: r.get(0)?,
+                    data: r.get(1)?,
+                })
+            })
+            .optional()
+            .map_err(err)
+    }
+
+    pub fn revision(&self) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT CAST(data AS INTEGER) FROM metadata WHERE key = 'revision'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(Option::unwrap_or_default)
+            .map_err(err)
+    }
+
+    pub fn auto_backup_revision(&self) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT CAST(data AS INTEGER) FROM metadata WHERE key = 'auto_backup_revision'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)
+    }
+
+    pub fn set_auto_backup_revision(&mut self, revision: i64) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO metadata (key,data) VALUES ('auto_backup_revision',?1) ON CONFLICT(key) DO UPDATE SET data=excluded.data",
+                [revision.to_string()],
+            )
+            .map(|_| ())
+            .map_err(err)
+    }
+
+    /// True when there is nothing worth backing up.
+    pub fn is_empty(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT NOT EXISTS (SELECT 1 FROM spaces) AND NOT EXISTS (SELECT 1 FROM records)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(err)
     }
 
     fn rows<T: DeserializeOwned>(&self, table: &str) -> Result<Vec<T>> {
@@ -278,6 +551,7 @@ impl Store {
         data.spaces.push(space.clone());
         validate(&data)?;
         self.conn.execute("INSERT INTO spaces (id,parent_id,data) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET parent_id=excluded.parent_id,data=excluded.data", params![space.id, space.parent_id, json(&space)?]).map_err(|e| e.to_string())?;
+        touch(&self.conn)?;
         self.snapshot()
     }
 
@@ -287,10 +561,38 @@ impl Store {
         }
         item.name = item.name.trim().into();
         let mut data = self.snapshot()?;
+        let previous = data
+            .items
+            .iter()
+            .find(|i| i.id == item.id)
+            .and_then(|i| i.photo.clone());
+        // The editor sends a newly picked photo as a data URL and an unchanged
+        // one as its stored id.
+        let new_photo = match item.photo.as_deref() {
+            Some(url) if url.starts_with("data:") => {
+                let photo = Photo::from_data_url(url)?;
+                item.photo = Some(Uuid::new_v4().to_string());
+                Some(photo)
+            }
+            Some(id) if previous.as_deref() != Some(id) => {
+                return Err("사진을 찾을 수 없습니다. 사진을 다시 선택해 주세요.".into());
+            }
+            _ => None,
+        };
         data.items.retain(|i| i.id != item.id);
         data.items.push(item.clone());
         validate(&data)?;
-        self.conn.execute("INSERT INTO items (id,space_id,data) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET space_id=excluded.space_id,data=excluded.data", params![item.id, item.space_id, json(&item)?]).map_err(|e| e.to_string())?;
+        let tx = self.conn.transaction().map_err(err)?;
+        tx.execute("INSERT INTO items (id,space_id,data) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET space_id=excluded.space_id,data=excluded.data", params![item.id, item.space_id, json(&item)?]).map_err(err)?;
+        if previous != item.photo {
+            tx.execute("DELETE FROM photos WHERE item_id = ?1", [&item.id])
+                .map_err(err)?;
+        }
+        if let (Some(photo), Some(id)) = (new_photo, &item.photo) {
+            insert_photo(&tx, id, &item.id, &photo)?;
+        }
+        touch(&tx)?;
+        tx.commit().map_err(err)?;
         self.snapshot()
     }
 
@@ -319,6 +621,7 @@ impl Store {
         data.tasks.push(task.clone());
         validate(&data)?;
         self.conn.execute("INSERT INTO tasks (id,space_id,item_id,data) VALUES (?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET space_id=excluded.space_id,item_id=excluded.item_id,data=excluded.data", params![task.id, task.space_id, task.item_id, json(&task)?]).map_err(|e| e.to_string())?;
+        touch(&self.conn)?;
         self.snapshot()
     }
 
@@ -346,9 +649,11 @@ impl Store {
             "task" => "tasks",
             _ => return Err("삭제할 대상을 찾을 수 없습니다.".into()),
         };
+        // Deleting an item also deletes its photo (ON DELETE CASCADE).
         self.conn
             .execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])
             .map_err(|e| e.to_string())?;
+        touch(&self.conn)?;
         self.snapshot()
     }
 
@@ -404,6 +709,7 @@ impl Store {
             params![task.id, json(&task)?],
         )
         .map_err(|e| e.to_string())?;
+        touch(&tx)?;
         tx.commit().map_err(|e| e.to_string())?;
         self.snapshot()
     }
@@ -462,12 +768,14 @@ impl Store {
         .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM records WHERE id=?1", [record_id])
             .map_err(|e| e.to_string())?;
+        touch(&tx)?;
         tx.commit().map_err(|e| e.to_string())?;
         self.snapshot()
     }
 
     pub fn set_settings(&mut self, settings: Settings) -> Result<Snapshot> {
         self.conn.execute("INSERT INTO metadata (key,data) VALUES ('settings',?1) ON CONFLICT(key) DO UPDATE SET data=excluded.data", [json(&settings)?]).map_err(|e| e.to_string())?;
+        touch(&self.conn)?;
         self.snapshot()
     }
 
@@ -488,10 +796,27 @@ impl Store {
         Ok(())
     }
 
-    pub fn restore(&mut self, data: &Snapshot) -> Result<Snapshot> {
+    /// Replaces all data with the contents of an opened backup.
+    pub fn restore(&mut self, source: &Store) -> Result<Snapshot> {
+        let data = source.snapshot()?;
+        self.replace_all(&data, |id| {
+            let photo = source.photo(id)?.ok_or(MISSING_PHOTO)?;
+            photo.check()?;
+            Ok(photo)
+        })?;
+        self.snapshot()
+    }
+
+    /// Replaces everything in one transaction. `photo` returns the bytes for
+    /// each photo id the snapshot refers to.
+    fn replace_all(
+        &mut self,
+        data: &Snapshot,
+        mut photo: impl FnMut(&str) -> Result<Photo>,
+    ) -> Result<()> {
         validate(data)?;
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute_batch("PRAGMA defer_foreign_keys=ON; DELETE FROM tasks; DELETE FROM items; DELETE FROM spaces; DELETE FROM records;").map_err(|e| e.to_string())?;
+        tx.execute_batch("PRAGMA defer_foreign_keys=ON; DELETE FROM photos; DELETE FROM tasks; DELETE FROM items; DELETE FROM spaces; DELETE FROM records;").map_err(|e| e.to_string())?;
         for s in &data.spaces {
             tx.execute(
                 "INSERT INTO spaces (id,parent_id,data) VALUES (?1,?2,?3)",
@@ -505,6 +830,9 @@ impl Store {
                 params![i.id, i.space_id, json(i)?],
             )
             .map_err(|e| e.to_string())?;
+            if let Some(id) = &i.photo {
+                insert_photo(&tx, id, &i.id, &photo(id)?)?;
+            }
         }
         for t in &data.tasks {
             tx.execute(
@@ -521,8 +849,9 @@ impl Store {
             .map_err(|e| e.to_string())?;
         }
         tx.execute("INSERT INTO metadata (key,data) VALUES ('settings',?1) ON CONFLICT(key) DO UPDATE SET data=excluded.data", [json(&data.settings)?]).map_err(|e| e.to_string())?;
+        touch(&tx)?;
         tx.commit().map_err(|e| e.to_string())?;
-        self.snapshot()
+        Ok(())
     }
 }
 
@@ -571,16 +900,64 @@ mod tests {
         assert_eq!(db.snapshot().unwrap().spaces[0].parent_id, None);
     }
 
+    /// A 1x1 JPEG header is enough for the signature check.
+    const JPEG: &str = "data:image/jpeg;base64,/9j/2Q==";
+    const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jp1sAAAAASUVORK5CYII=";
+
+    fn item(id: &str, photo: Option<&str>) -> Item {
+        Item {
+            id: id.into(),
+            space_id: "home".into(),
+            name: id.into(),
+            quantity: 1.0,
+            unit: "개".into(),
+            notes: "".into(),
+            photo: photo.map(Into::into),
+            expires_on: None,
+            purchased_on: None,
+            purchase_store: "".into(),
+            purchase_price: None,
+        }
+    }
+
+    fn photo_rows(db: &Store) -> i64 {
+        db.conn
+            .query_row("SELECT count(*) FROM photos", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Writes rows without validation, as a damaged or hand-made backup might.
+    fn raw_source(sql: &str) -> Store {
+        let source = store();
+        source
+            .conn
+            .execute_batch(&format!("PRAGMA foreign_keys = OFF; {sql}"))
+            .unwrap();
+        source
+    }
+
     #[test]
     fn invalid_restore_preserves_existing_database() {
         let mut db = store();
         db.save_space(space("home", None)).unwrap();
-        let bad = Snapshot {
-            spaces: vec![space("shelf", Some("missing"))],
-            ..Default::default()
-        };
-        assert!(db.restore(&bad).is_err());
-        assert_eq!(db.snapshot().unwrap().spaces[0].id, "home");
+        let orphan = raw_source(&format!(
+            "INSERT INTO spaces VALUES ('shelf','missing','{}');",
+            json(&space("shelf", Some("missing"))).unwrap()
+        ));
+        assert!(db.restore(&orphan).is_err());
+        // The photo row is missing, so the restore fails mid-transaction.
+        let missing_photo = raw_source(&format!(
+            "INSERT INTO spaces VALUES ('home',NULL,'{}'); INSERT INTO items VALUES ('cup','home','{}');",
+            json(&space("home", None)).unwrap(),
+            json(&item("cup", Some("ghost"))).unwrap()
+        ));
+        assert_eq!(
+            db.restore(&missing_photo).unwrap_err(),
+            MISSING_PHOTO.to_string()
+        );
+        let data = db.snapshot().unwrap();
+        assert_eq!(data.spaces.len(), 1);
+        assert!(data.items.is_empty());
     }
 
     #[test]
@@ -590,9 +967,145 @@ mod tests {
             spaces: vec![space("shelf", Some("home")), space("home", None)],
             ..Default::default()
         };
-        let restored = db.restore(&data).unwrap();
+        let restored = db.restore(&Store::from_legacy(data).unwrap()).unwrap();
         assert_eq!(restored.spaces.len(), 2);
         assert_eq!(space_path(&restored, "shelf"), "home / shelf");
+    }
+
+    #[test]
+    fn photos_are_stored_apart_from_item_data_and_follow_their_item() {
+        let mut db = store();
+        db.save_space(space("home", None)).unwrap();
+        let data = db.save_item(item("cup", Some(JPEG))).unwrap();
+        let first = data.items[0].photo.clone().unwrap();
+        assert!(!first.starts_with("data:"), "snapshots carry only the id");
+        assert_eq!(
+            db.photo(&first).unwrap().unwrap(),
+            Photo {
+                mime: "image/jpeg".into(),
+                data: vec![0xFF, 0xD8, 0xFF, 0xD9]
+            }
+        );
+        // Saving other fields keeps the photo.
+        let mut edited = data.items[0].clone();
+        edited.notes = "메모".into();
+        let data = db.save_item(edited.clone()).unwrap();
+        assert_eq!(data.items[0].photo.as_deref(), Some(first.as_str()));
+        // A new photo gets a new id and the old row is removed.
+        edited.photo = Some(PNG.into());
+        let data = db.save_item(edited.clone()).unwrap();
+        let second = data.items[0].photo.clone().unwrap();
+        assert_ne!(second, first);
+        assert!(db.photo(&first).unwrap().is_none());
+        assert_eq!(db.photo(&second).unwrap().unwrap().mime, "image/png");
+        assert_eq!(photo_rows(&db), 1);
+        // Another item cannot point at this photo.
+        assert!(db.save_item(item("plate", Some(&second))).is_err());
+        // Bytes that do not match the declared type are rejected.
+        assert!(db
+            .save_item(item("bowl", Some("data:image/png;base64,/9j/2Q==")))
+            .is_err());
+        edited.photo = None;
+        db.save_item(edited.clone()).unwrap();
+        assert_eq!(photo_rows(&db), 0);
+        edited.photo = Some(JPEG.into());
+        db.save_item(edited).unwrap();
+        db.delete("item", "cup").unwrap();
+        assert_eq!(photo_rows(&db), 0);
+    }
+
+    #[test]
+    fn upgrading_v1_moves_inline_photos_and_keeps_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zipsa.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("
+            CREATE TABLE spaces (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES spaces(id) DEFERRABLE INITIALLY DEFERRED, data TEXT NOT NULL);
+            CREATE TABLE items (id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id), data TEXT NOT NULL);
+            CREATE TABLE tasks (id TEXT PRIMARY KEY, space_id TEXT REFERENCES spaces(id), item_id TEXT REFERENCES items(id), data TEXT NOT NULL, CHECK ((space_id IS NULL) != (item_id IS NULL)));
+            CREATE TABLE records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+            PRAGMA user_version = 1;").unwrap();
+        conn.execute(
+            "INSERT INTO spaces VALUES ('home',NULL,?1)",
+            [json(&space("home", None)).unwrap()],
+        )
+        .unwrap();
+        for (id, photo) in [
+            ("cup", Some(JPEG)),
+            ("plate", Some("data:image/jpeg;base64,!!")),
+            ("bowl", None),
+        ] {
+            conn.execute(
+                "INSERT INTO items VALUES (?1,'home',?2)",
+                params![id, json(&item(id, photo)).unwrap()],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let db = Store::open(&path).unwrap();
+        assert_eq!(user_version(&db.conn).unwrap(), SCHEMA_VERSION);
+        let data = db.snapshot().unwrap();
+        let photo = |id: &str| {
+            data.items
+                .iter()
+                .find(|i| i.id == id)
+                .unwrap()
+                .photo
+                .clone()
+        };
+        let cup = photo("cup").unwrap();
+        assert_eq!(
+            db.photo(&cup).unwrap().unwrap().data,
+            [0xFF, 0xD8, 0xFF, 0xD9]
+        );
+        assert_eq!(photo("plate"), None, "an undecodable photo is dropped");
+        assert_eq!(photo("bowl"), None);
+
+        let saved: Vec<_> = fs::read_dir(dir.path().join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(saved.len(), 1);
+        let name = saved[0].file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("before-upgrade-v1-"), "{name}");
+        // The pre-upgrade copy is itself restorable, inline photos included.
+        let copy = dir.path().join("copy.sqlite");
+        fs::copy(&saved[0], &copy).unwrap();
+        let source = Store::open_backup_copy(&copy).unwrap();
+        let mut restored = store();
+        let data = restored.restore(&source).unwrap();
+        let cup = data.items.iter().find(|i| i.id == "cup").unwrap();
+        assert!(restored
+            .photo(cup.photo.as_deref().unwrap())
+            .unwrap()
+            .is_some());
+        // Opening again does not repeat the upgrade backup.
+        drop(db);
+        Store::open(&path).unwrap();
+        assert_eq!(fs::read_dir(dir.path().join("backups")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn only_user_edits_change_the_revision() {
+        let mut db = store();
+        assert_eq!(db.revision().unwrap(), 0);
+        db.save_space(space("home", None)).unwrap();
+        let mut t = crate::schedule::tests::task();
+        t.anchor_at = "2020-01-01T00:00:00Z".into();
+        t.due_at = t.anchor_at.clone();
+        db.save_task(t).unwrap();
+        db.set_settings(Settings {
+            notifications: true,
+        })
+        .unwrap();
+        let revision = db.revision().unwrap();
+        assert_eq!(revision, 3);
+        db.mark_notified(&db.reminders().unwrap()[0]).unwrap();
+        db.set_auto_backup_revision(revision).unwrap();
+        assert_eq!(db.revision().unwrap(), revision);
+        assert_eq!(db.auto_backup_revision().unwrap(), Some(revision));
     }
 
     #[test]
@@ -634,9 +1147,15 @@ mod tests {
         t.item_id = Some(item.id.clone());
         db.save_task(t).unwrap();
         assert!(db.delete("item", &item.id).is_err());
+        let photo_id = db.snapshot().unwrap().items[0].photo.clone().unwrap();
         drop(db);
-        let restored = Store::open(&path).unwrap().snapshot().unwrap();
-        assert_eq!(restored.items[0].photo, item.photo);
+        let reopened = Store::open(&path).unwrap();
+        let restored = reopened.snapshot().unwrap();
+        assert_eq!(restored.items[0].photo.as_deref(), Some(photo_id.as_str()));
+        assert_eq!(
+            reopened.photo(&photo_id).unwrap().unwrap().data,
+            [0xFF, 0xD8, 0xFF, 0xD9]
+        );
         assert_eq!(restored.items[0].purchase_price, Some(4800));
         assert_eq!(restored.tasks[0].item_id.as_deref(), Some("milk"));
     }
@@ -667,15 +1186,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("future.sqlite");
         let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
         drop(conn);
         assert!(Store::open(&path).is_err());
         let conn = Connection::open(&path).unwrap();
-        assert_eq!(
-            conn.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
-                .unwrap(),
-            2
-        );
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION + 1);
     }
 
     #[test]
@@ -887,7 +1403,9 @@ mod tests {
         let bytes = serde_json::to_string(&done).unwrap();
         let restored: Snapshot = serde_json::from_str(&bytes).unwrap();
         let mut second = store();
-        second.restore(&restored).unwrap();
+        second
+            .restore(&Store::from_legacy(restored).unwrap())
+            .unwrap();
         let reopened = second.reopen(&task.id, &done.records[0].id).unwrap();
         assert_eq!(reopened.tasks[0].reminder_minutes, Some(10080));
         assert!(reopened.tasks[0].notified_reminder_at.is_none());

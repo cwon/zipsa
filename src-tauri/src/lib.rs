@@ -1,3 +1,4 @@
+mod backup;
 mod calendar;
 mod feedback;
 mod models;
@@ -7,16 +8,19 @@ mod updates;
 
 use std::{
     fs,
-    io::{Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Mutex,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use chrono::Utc;
+use chrono::Local;
 use models::*;
 use serde::Serialize;
 use tauri::{
+    http::{
+        header::{CACHE_CONTROL, CONTENT_TYPE},
+        Response, StatusCode,
+    },
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     Manager, State,
@@ -31,6 +35,35 @@ type Result<T> = std::result::Result<T, String>;
 fn lock(db: &Db) -> Result<std::sync::MutexGuard<'_, store::Store>> {
     db.lock()
         .map_err(|_| "저장소를 열지 못했습니다. 앱을 다시 실행해 주세요.".into())
+}
+
+fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf> {
+    app.path().app_data_dir().map_err(|e| e.to_string())
+}
+
+/// Photos are served to the webview from the database on request
+/// (`zipsa-photo://localhost/<id>`), so data loads never carry photo bytes.
+const PHOTO_SCHEME: &str = "zipsa-photo";
+
+fn stored_photo(app: &tauri::AppHandle, id: &str) -> Option<store::Photo> {
+    let state = app.try_state::<Db>()?;
+    let db = lock(&state).ok()?;
+    db.photo(id).ok().flatten()
+}
+
+fn photo_response(app: &tauri::AppHandle, id: &str) -> Response<Vec<u8>> {
+    let response = match stored_photo(app, id) {
+        // A photo id is never reused: replacing a photo creates a new id.
+        Some(photo) => Response::builder()
+            .header(CONTENT_TYPE, photo.mime)
+            .header(CACHE_CONTROL, "max-age=31536000, immutable")
+            .body(photo.data),
+        None => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(CACHE_CONTROL, "no-store")
+            .body(Vec::new()),
+    };
+    response.unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
 #[derive(Serialize)]
@@ -129,49 +162,6 @@ fn save_settings(db: State<'_, Db>, settings: Settings) -> Result<Snapshot> {
     lock(&db)?.set_settings(settings)
 }
 
-fn write_backup(path: &Path, data: Snapshot) -> Result<()> {
-    let backup = Backup {
-        format: "zipsa-backup".into(),
-        version: 1,
-        exported_at: Utc::now().to_rfc3339(),
-        data,
-    };
-    let parent = path.parent().ok_or("백업 경로가 올바르지 않습니다.")?;
-    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    serde_json::to_writer(file.as_file_mut(), &backup).map_err(|e| e.to_string())?;
-    file.flush().map_err(|e| e.to_string())?;
-    if file.as_file().metadata().map_err(|e| e.to_string())?.len() > 256 * 1024 * 1024 {
-        return Err(
-            "백업 크기가 256MB를 넘었습니다. 사진 용량을 줄인 뒤 다시 시도해 주세요.".into(),
-        );
-    }
-    file.as_file().sync_all().map_err(|e| e.to_string())?;
-    file.persist(path).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn read_backup(path: &Path) -> Result<Backup> {
-    const MAX: u64 = 256 * 1024 * 1024;
-    let file = fs::File::open(path).map_err(|e| e.to_string())?;
-    if file.metadata().map_err(|e| e.to_string())?.len() > MAX {
-        return Err("백업 파일은 256MB 이하여야 합니다.".into());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX {
-        return Err("백업 파일이 너무 큽니다.".into());
-    }
-    let backup: Backup = serde_json::from_slice(&bytes)
-        .map_err(|_| "집사 백업 파일을 읽지 못했습니다. 올바른 .zipsa 파일인지 확인해 주세요.")?;
-    if backup.format != "zipsa-backup" || backup.version != 1 {
-        return Err("지원하지 않는 백업 형식입니다.".into());
-    }
-    store::validate(&backup.data)?;
-    Ok(backup)
-}
-
 #[tauri::command]
 async fn export_backup(app: tauri::AppHandle) -> Result<Option<String>> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -179,14 +169,13 @@ async fn export_backup(app: tauri::AppHandle) -> Result<Option<String>> {
             .dialog()
             .file()
             .add_filter("집사 백업", &["zipsa"])
-            .set_file_name(format!("Zipsa-{}.zipsa", Utc::now().format("%Y-%m-%d")))
+            .set_file_name(format!("Zipsa-{}.zipsa", Local::now().format("%Y-%m-%d")))
             .blocking_save_file();
         let Some(path) = path else {
             return Ok(None);
         };
         let path = path.into_path().map_err(|e| e.to_string())?;
-        let snapshot = lock(&app.state::<Db>())?.snapshot()?;
-        write_backup(&path, snapshot)?;
+        lock(&app.state::<Db>())?.backup_to(&path)?;
         Ok(Some(path.display().to_string()))
     })
     .await
@@ -203,21 +192,42 @@ struct RestoreResult {
 #[tauri::command]
 async fn import_backup(app: tauri::AppHandle) -> Result<Option<RestoreResult>> {
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(path) = app.dialog().file().add_filter("집사 백업", &["zipsa"]).blocking_pick_file() else { return Ok(None); };
+        let data_dir = data_dir(&app)?;
+        let auto_dir = backup::auto_dir(&data_dir);
+        let mut dialog = app.dialog().file().add_filter("집사 백업", &["zipsa"]);
+        // Automatic backups live in a hidden app folder; start the picker there.
+        if auto_dir.is_dir() { dialog = dialog.set_directory(&auto_dir); }
+        let Some(path) = dialog.blocking_pick_file() else { return Ok(None); };
         let path = path.into_path().map_err(|e| e.to_string())?;
-        let backup = read_backup(&path)?;
-        let confirmed = app.dialog().message(format!("공간 {}개, 아이템 {}개, 할 일 {}개를 복원합니다.\n현재 데이터는 이 백업의 내용으로 교체됩니다.\n교체 전 데이터는 자동으로 별도 백업합니다.", backup.data.spaces.len(), backup.data.items.len(), backup.data.tasks.len()))
+        let source = backup::open(&path)?;
+        let summary = source.store.snapshot()?;
+        store::validate(&summary)?;
+        let confirmed = app.dialog().message(format!("공간 {}개, 아이템 {}개, 할 일 {}개를 복원합니다.\n현재 데이터는 이 백업의 내용으로 교체됩니다.\n교체 전 데이터는 자동으로 별도 백업합니다.", summary.spaces.len(), summary.items.len(), summary.tasks.len()))
             .title("집사 백업 복원").kind(MessageDialogKind::Warning)
             .buttons(MessageDialogButtons::OkCancelCustom("복원".into(), "취소".into())).blocking_show();
         if !confirmed { return Ok(None); }
-        let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("backups");
+        let dir = data_dir.join("backups");
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let recovery: PathBuf = dir.join(format!("before-restore-{}.zipsa", uuid::Uuid::new_v4()));
+        let recovery: PathBuf = dir.join(format!("before-restore-{}.zipsa", Local::now().format("%Y%m%d-%H%M%S")));
         let state = app.state::<Db>(); let mut db = lock(&state)?;
-        write_backup(&recovery, db.snapshot()?)?;
-        let data = db.restore(&backup.data)?;
+        db.backup_to(&recovery)?;
+        let data = db.restore(&source.store)?;
         Ok(Some(RestoreResult { data, recovery_path: recovery.display().to_string() }))
     }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn auto_backup_status(app: tauri::AppHandle) -> Result<backup::AutoBackupStatus> {
+    Ok(backup::auto_status(&backup::auto_dir(&data_dir(&app)?)))
+}
+
+#[tauri::command]
+fn open_backup_folder(app: tauri::AppHandle) -> Result<()> {
+    let dir = backup::auto_dir(&data_dir(&app)?);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    app.opener()
+        .open_path(dir.display().to_string(), None::<&str>)
+        .map_err(|_| "백업 폴더를 열지 못했어요.".into())
 }
 
 fn show_main(app: &tauri::AppHandle) {
@@ -228,64 +238,94 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
-fn start_reminders(app: tauri::AppHandle) {
-    std::thread::spawn(move || loop {
-        let state = app.state::<Db>();
-        if let Ok(mut db) = lock(&state) {
-            if let Ok(due) = db.reminders() {
-                for kind in [store::ReminderKind::Advance, store::ReminderKind::Due] {
-                    let group: Vec<_> = due
-                        .iter()
-                        .filter(|reminder| reminder.kind == kind)
-                        .collect();
-                    if group.is_empty() {
-                        continue;
-                    }
-                    let advance = kind == store::ReminderKind::Advance;
-                    let body = if group.len() == 1 && advance {
-                        let time = schedule::parse_time(&group[0].task.due_at)
-                            .map(|at| {
-                                at.with_timezone(&chrono::Local)
-                                    .format("%m월 %d일 %H:%M")
-                                    .to_string()
-                            })
-                            .unwrap_or_default();
-                        format!("{} · {} 예정이에요.", group[0].task.title, time)
-                    } else if group.len() == 1 {
-                        format!("{} · 예정된 할 일을 확인해 주세요.", group[0].task.title)
+/// The first automatic backup check waits a minute so it never slows startup.
+const AUTO_BACKUP_DELAY: Duration = Duration::from_secs(60);
+const AUTO_BACKUP_CHECK: Duration = Duration::from_secs(60 * 60);
+
+fn start_background(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut next_backup = Instant::now() + AUTO_BACKUP_DELAY;
+        loop {
+            send_reminders(&app);
+            if Instant::now() >= next_backup {
+                next_backup = Instant::now() + AUTO_BACKUP_CHECK;
+                auto_backup(&app);
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+}
+
+fn auto_backup(app: &tauri::AppHandle) {
+    let Ok(dir) = data_dir(app).map(|dir| backup::auto_dir(&dir)) else {
+        return;
+    };
+    let state = app.state::<Db>();
+    let Ok(mut db) = lock(&state) else {
+        return;
+    };
+    // A failure (for example a full disk) is retried at the next check.
+    if let Err(e) = backup::run_auto(&mut db, &dir, Local::now().naive_local()) {
+        eprintln!("자동 백업 실패: {e}");
+    }
+}
+
+fn send_reminders(app: &tauri::AppHandle) {
+    let state = app.state::<Db>();
+    let Ok(mut db) = lock(&state) else {
+        return;
+    };
+    if let Ok(due) = db.reminders() {
+        for kind in [store::ReminderKind::Advance, store::ReminderKind::Due] {
+            let group: Vec<_> = due
+                .iter()
+                .filter(|reminder| reminder.kind == kind)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            let advance = kind == store::ReminderKind::Advance;
+            let body = if group.len() == 1 && advance {
+                let time = schedule::parse_time(&group[0].task.due_at)
+                    .map(|at| {
+                        at.with_timezone(&chrono::Local)
+                            .format("%m월 %d일 %H:%M")
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                format!("{} · {} 예정이에요.", group[0].task.title, time)
+            } else if group.len() == 1 {
+                format!("{} · 예정된 할 일을 확인해 주세요.", group[0].task.title)
+            } else {
+                format!(
+                    "{} 외 {}개의 할 일이 {}.",
+                    group[0].task.title,
+                    group.len() - 1,
+                    if advance {
+                        "예정되어 있어요"
                     } else {
-                        format!(
-                            "{} 외 {}개의 할 일이 {}.",
-                            group[0].task.title,
-                            group.len() - 1,
-                            if advance {
-                                "예정되어 있어요"
-                            } else {
-                                "기다리고 있어요"
-                            }
-                        )
-                    };
-                    if app
-                        .notification()
-                        .builder()
-                        .title(if advance {
-                            "집사 · 할 일 미리 알림"
-                        } else {
-                            "집사 · 할 일 알림"
-                        })
-                        .body(body)
-                        .show()
-                        .is_ok()
-                    {
-                        for reminder in group {
-                            let _ = db.mark_notified(reminder);
-                        }
+                        "기다리고 있어요"
                     }
+                )
+            };
+            if app
+                .notification()
+                .builder()
+                .title(if advance {
+                    "집사 · 할 일 미리 알림"
+                } else {
+                    "집사 · 할 일 알림"
+                })
+                .body(body)
+                .show()
+                .is_ok()
+            {
+                for reminder in group {
+                    let _ = db.mark_notified(reminder);
                 }
             }
         }
-        std::thread::sleep(Duration::from_secs(30));
-    });
+    }
 }
 
 pub fn run() {
@@ -296,6 +336,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .register_asynchronous_uri_scheme_protocol(PHOTO_SCHEME, |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let id = request.uri().path().trim_start_matches('/').to_owned();
+            tauri::async_runtime::spawn_blocking(move || {
+                responder.respond(photo_response(&app, &id));
+            });
+        })
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--background"]),
@@ -315,7 +362,9 @@ pub fn run() {
             reopen_task,
             save_settings,
             export_backup,
-            import_backup
+            import_backup,
+            auto_backup_status,
+            open_backup_folder
         ])
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
@@ -348,7 +397,7 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
-            start_reminders(app.handle().clone());
+            start_background(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -361,29 +410,4 @@ pub fn run() {
         #[cfg(not(target_os = "macos"))]
         let _ = (app, event);
     });
-}
-
-#[cfg(test)]
-mod backup_tests {
-    use super::*;
-
-    #[test]
-    fn backup_round_trip_is_portable_and_wrong_formats_are_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("backup.zipsa");
-        let data = Snapshot {
-            spaces: vec![Space {
-                id: "home".into(),
-                parent_id: None,
-                name: "우리 집".into(),
-                icon: "🏠".into(),
-                notes: "로컬 백업".into(),
-            }],
-            ..Default::default()
-        };
-        write_backup(&path, data).unwrap();
-        assert_eq!(read_backup(&path).unwrap().data.spaces[0].name, "우리 집");
-        fs::write(&path, r#"{"format":"other-app","version":1,"exportedAt":"2026-01-01","data":{"spaces":[],"items":[],"tasks":[],"records":[],"settings":{"notifications":false}}}"#).unwrap();
-        assert!(read_backup(&path).is_err());
-    }
 }
