@@ -3,7 +3,7 @@
 집·사무실의 공간, 아이템, 할 일을 연결해 관리하는 데스크톱 앱입니다.
 계정 없이 사용하며, 사진을 포함한 모든 생활 정보는 내 컴퓨터에 저장합니다.
 
-**macOS 13 이상 · Windows 10 이상(x64)** — 현재 초기 개발 버전입니다.
+**macOS 13 이상(Apple Silicon) · Windows 10 이상(x64)** — 현재 초기 개발 버전입니다.
 
 ## 다운로드
 
@@ -12,7 +12,6 @@
 | 운영체제              | 설치 파일                                                                                    |
 | --------------------- | -------------------------------------------------------------------------------------------- |
 | macOS · Apple Silicon | [DMG 다운로드](https://github.com/cwon/zipsa/releases/latest/download/Zipsa-macOS-arm64.dmg) |
-| macOS · Intel         | [DMG 다운로드](https://github.com/cwon/zipsa/releases/latest/download/Zipsa-macOS-x64.dmg)   |
 | Windows · x64         | [EXE 다운로드](https://github.com/cwon/zipsa/releases/latest/download/Zipsa-Windows-x64.exe) |
 
 위 링크는 항상 최신 정식 릴리스를 가리킵니다. 현재 설치 파일은 macOS 공증과 Windows 코드 서명이 적용되지 않아 운영체제에서 확인 메시지가 표시될 수 있습니다.

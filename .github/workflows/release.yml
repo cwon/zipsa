@@ -43,10 +43,9 @@ jobs:
                   '집·사무실의 공간, 아이템, 할 일을 내 컴퓨터에서 관리하는 데스크톱 앱입니다.',
                   '',
                   '- Apple Silicon Mac: `Zipsa-macOS-arm64.dmg`',
-                  '- Intel Mac: `Zipsa-macOS-x64.dmg`',
                   '- Windows x64: `Zipsa-Windows-x64.exe`',
                   '',
-                  '지원 환경: macOS 13 이상 · Windows 10 이상(x64).',
+                  '지원 환경: macOS 13 이상(Apple Silicon) · Windows 10 이상(x64).',
                   'macOS 공증과 Windows 코드 서명이 적용되지 않은 초기 개발 버전입니다.',
                   '',
                   '사진을 포함한 생활 정보는 로컬에 저장합니다. 버전 확인은 앱 설정에서 직접 실행하며, 설치는 다운로드 후 진행합니다.',
@@ -66,9 +65,6 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: Zipsa-macOS-arm64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            asset: Zipsa-macOS-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: Zipsa-Windows-x64
@@ -130,7 +126,6 @@ jobs:
             const assets = await github.paginate(github.rest.repos.listReleaseAssets, { owner, repo, release_id, per_page: 100 });
             const required = [
               'Zipsa-macOS-arm64.dmg',
-              'Zipsa-macOS-x64.dmg',
               'Zipsa-Windows-x64.exe',
             ];
             for (const name of required) {
