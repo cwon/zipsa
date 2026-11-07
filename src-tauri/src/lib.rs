@@ -1,3 +1,4 @@
+mod calendar;
 mod feedback;
 mod models;
 mod schedule;
@@ -88,6 +89,11 @@ fn open_download_page(app: tauri::AppHandle, latest: bool) -> Result<()> {
 #[tauri::command]
 fn load_data(db: State<'_, Db>) -> Result<Snapshot> {
     lock(&db)?.snapshot()
+}
+#[tauri::command]
+fn calendar_events(db: State<'_, Db>, start: String, end: String) -> Result<Vec<CalendarEvent>> {
+    let data = lock(&db)?.snapshot()?;
+    calendar::events(&data, &start, &end)
 }
 #[tauri::command]
 fn save_space(db: State<'_, Db>, space: Space) -> Result<Snapshot> {
@@ -227,26 +233,52 @@ fn start_reminders(app: tauri::AppHandle) {
         let state = app.state::<Db>();
         if let Ok(mut db) = lock(&state) {
             if let Ok(due) = db.reminders() {
-                if !due.is_empty() {
-                    let body = if due.len() == 1 {
-                        format!("{} · 예정된 할 일을 확인해 주세요.", due[0].title)
+                for kind in [store::ReminderKind::Advance, store::ReminderKind::Due] {
+                    let group: Vec<_> = due
+                        .iter()
+                        .filter(|reminder| reminder.kind == kind)
+                        .collect();
+                    if group.is_empty() {
+                        continue;
+                    }
+                    let advance = kind == store::ReminderKind::Advance;
+                    let body = if group.len() == 1 && advance {
+                        let time = schedule::parse_time(&group[0].task.due_at)
+                            .map(|at| {
+                                at.with_timezone(&chrono::Local)
+                                    .format("%m월 %d일 %H:%M")
+                                    .to_string()
+                            })
+                            .unwrap_or_default();
+                        format!("{} · {} 예정이에요.", group[0].task.title, time)
+                    } else if group.len() == 1 {
+                        format!("{} · 예정된 할 일을 확인해 주세요.", group[0].task.title)
                     } else {
                         format!(
-                            "{} 외 {}개의 할 일이 기다리고 있어요.",
-                            due[0].title,
-                            due.len() - 1
+                            "{} 외 {}개의 할 일이 {}.",
+                            group[0].task.title,
+                            group.len() - 1,
+                            if advance {
+                                "예정되어 있어요"
+                            } else {
+                                "기다리고 있어요"
+                            }
                         )
                     };
                     if app
                         .notification()
                         .builder()
-                        .title("집사 · 할 일 알림")
+                        .title(if advance {
+                            "집사 · 할 일 미리 알림"
+                        } else {
+                            "집사 · 할 일 알림"
+                        })
                         .body(body)
                         .show()
                         .is_ok()
                     {
-                        for task in &due {
-                            let _ = db.mark_notified(task);
+                        for reminder in group {
+                            let _ = db.mark_notified(reminder);
                         }
                     }
                 }
@@ -274,6 +306,7 @@ pub fn run() {
             check_latest_release,
             open_download_page,
             load_data,
+            calendar_events,
             save_space,
             save_item,
             save_task,

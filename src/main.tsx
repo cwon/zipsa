@@ -4,6 +4,7 @@ import App from "./App";
 import { applyTheme, readThemePreference } from "./theme";
 import "pretendard/dist/web/variable/pretendardvariable.css";
 import "./styles.css";
+import "./calendar.css";
 
 applyTheme(readThemePreference());
 

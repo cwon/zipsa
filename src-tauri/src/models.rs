@@ -42,6 +42,23 @@ pub struct Task {
     pub timezone: String,
     pub active: bool,
     pub notified_due_at: Option<String>,
+    #[serde(default)]
+    pub reminder_minutes: Option<u32>,
+    #[serde(default)]
+    pub notified_reminder_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarEvent {
+    pub id: String,
+    pub task_id: String,
+    pub title: String,
+    pub target: String,
+    pub scheduled_for: String,
+    pub kind: String,
+    pub record_id: Option<String>,
+    pub completed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

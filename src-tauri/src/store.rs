@@ -3,7 +3,7 @@ use std::{
     path::Path,
 };
 
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rusqlite::{params, Connection};
 use serde::{de::DeserializeOwned, Serialize};
 use uuid::Uuid;
@@ -17,6 +17,24 @@ type Result<T> = std::result::Result<T, String>;
 
 pub struct Store {
     pub conn: Connection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReminderKind {
+    Advance,
+    Due,
+}
+
+#[derive(Debug, Clone)]
+pub struct Reminder {
+    pub task: Task,
+    pub kind: ReminderKind,
+}
+
+fn advance_time(task: &Task) -> Option<DateTime<Utc>> {
+    parse_time(&task.due_at)
+        .ok()?
+        .checked_sub_signed(Duration::minutes(task.reminder_minutes? as i64))
 }
 
 fn text(value: &str, label: &str, required: bool, max: usize) -> Result<()> {
@@ -124,6 +142,17 @@ pub fn validate(data: &Snapshot) -> Result<()> {
         if let Some(d) = &t.notified_due_at {
             parse_time(d)?;
         }
+        if t.reminder_minutes
+            .is_some_and(|minutes| ![10, 60, 1440, 10080].contains(&minutes))
+        {
+            return Err("미리 알림은 10분·1시간·하루·일주일 전 중에서 선택해 주세요.".into());
+        }
+        if let Some(d) = &t.notified_reminder_at {
+            parse_time(d)?;
+        }
+        if t.reminder_minutes.is_some() && advance_time(t).is_none() {
+            return Err("미리 알림 시각이 지원하는 날짜 범위를 벗어났습니다.".into());
+        }
     }
     for r in &data.records {
         text(&r.title, "기록 이름", true, 200)?;
@@ -195,18 +224,36 @@ impl Store {
         }
     }
 
-    pub fn reminders(&self) -> Result<Vec<Task>> {
+    pub fn reminders(&self) -> Result<Vec<Reminder>> {
+        self.reminders_at(Utc::now())
+    }
+
+    pub fn reminders_at(&self, now: DateTime<Utc>) -> Result<Vec<Reminder>> {
         if !self.settings()?.notifications {
             return Ok(vec![]);
         }
         let tasks: Vec<Task> = self.rows("tasks")?;
-        let now = Utc::now();
         Ok(tasks
             .into_iter()
-            .filter(|t| {
-                t.active
-                    && t.notified_due_at.as_ref() != Some(&t.due_at)
-                    && parse_time(&t.due_at).is_ok_and(|time| time <= now)
+            .filter_map(|task| {
+                if !task.active {
+                    return None;
+                }
+                let due = parse_time(&task.due_at).ok()?;
+                // After sleep or a late launch, send the due notification only.
+                // A stale advance notification must not arrive alongside it.
+                let kind = if due <= now {
+                    (task.notified_due_at.as_ref() != Some(&task.due_at))
+                        .then_some(ReminderKind::Due)
+                } else {
+                    advance_time(&task)
+                        .filter(|at| *at <= now)
+                        .filter(|at| {
+                            task.notified_reminder_at.as_deref() != Some(at.to_rfc3339().as_str())
+                        })
+                        .map(|_| ReminderKind::Advance)
+                }?;
+                Some(Reminder { task, kind })
             })
             .collect())
     }
@@ -258,6 +305,16 @@ impl Store {
             .iter()
             .find(|t| t.id == task.id && t.due_at == task.due_at && t.active == task.active)
             .and_then(|t| t.notified_due_at.clone());
+        task.notified_reminder_at = data
+            .tasks
+            .iter()
+            .find(|t| {
+                t.id == task.id
+                    && t.due_at == task.due_at
+                    && t.active == task.active
+                    && t.reminder_minutes == task.reminder_minutes
+            })
+            .and_then(|t| t.notified_reminder_at.clone());
         data.tasks.retain(|t| t.id != task.id);
         data.tasks.push(task.clone());
         validate(&data)?;
@@ -334,6 +391,7 @@ impl Store {
             None => task.active = false,
         }
         task.notified_due_at = None;
+        task.notified_reminder_at = None;
         record.task_after = Some(task.clone());
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
         tx.execute(
@@ -395,6 +453,7 @@ impl Store {
         task.due_at = record.scheduled_for.clone();
         task.active = true;
         task.notified_due_at = None;
+        task.notified_reminder_at = None;
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
         tx.execute(
             "UPDATE tasks SET data=?2 WHERE id=?1",
@@ -412,9 +471,14 @@ impl Store {
         self.snapshot()
     }
 
-    pub fn mark_notified(&mut self, task: &Task) -> Result<()> {
-        let mut t = task.clone();
-        t.notified_due_at = Some(t.due_at.clone());
+    pub fn mark_notified(&mut self, reminder: &Reminder) -> Result<()> {
+        let mut t = reminder.task.clone();
+        match reminder.kind {
+            ReminderKind::Due => t.notified_due_at = Some(t.due_at.clone()),
+            ReminderKind::Advance => {
+                t.notified_reminder_at = advance_time(&t).map(|at| at.to_rfc3339());
+            }
+        }
         self.conn
             .execute(
                 "UPDATE tasks SET data=?2 WHERE id=?1",
@@ -591,7 +655,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(db.reminders().unwrap().len(), 1);
-        db.mark_notified(&t).unwrap();
+        db.mark_notified(&db.reminders().unwrap()[0]).unwrap();
         assert!(db.reminders().unwrap().is_empty());
         t.notes = "내용만 수정".into();
         db.save_task(t).unwrap();
@@ -723,5 +787,127 @@ mod tests {
         let data = db.snapshot().unwrap();
         assert!(!data.tasks[0].active);
         assert_eq!(data.records.len(), 1);
+    }
+
+    #[test]
+    fn advance_and_due_notifications_are_independent_and_do_not_reappear_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reminders.sqlite");
+        let mut db = Store::open(&path).unwrap();
+        db.save_space(space("home", None)).unwrap();
+        let mut task = crate::schedule::tests::task();
+        task.mode = "once".into();
+        task.due_at = "2030-04-01T09:00:00Z".into();
+        task.anchor_at = task.due_at.clone();
+        task.reminder_minutes = Some(60);
+        db.save_task(task.clone()).unwrap();
+        db.set_settings(Settings {
+            notifications: true,
+        })
+        .unwrap();
+        assert!(db
+            .reminders_at(parse_time("2030-04-01T07:59:59Z").unwrap())
+            .unwrap()
+            .is_empty());
+        let at = parse_time("2030-04-01T08:00:00Z").unwrap();
+        let notices = db.reminders_at(at).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, ReminderKind::Advance);
+        db.mark_notified(&notices[0]).unwrap();
+        task.title = "이름만 바꾼 청소".into();
+        let saved = db.save_task(task.clone()).unwrap();
+        assert!(saved.tasks[0].notified_reminder_at.is_some());
+        assert!(db.reminders_at(at).unwrap().is_empty());
+        drop(db);
+        let mut db = Store::open(&path).unwrap();
+        assert!(db.reminders_at(at).unwrap().is_empty());
+        let notices = db.reminders_at(parse_time(&task.due_at).unwrap()).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, ReminderKind::Due);
+        db.mark_notified(&notices[0]).unwrap();
+        assert!(db
+            .reminders_at(parse_time(&task.due_at).unwrap())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn missed_advance_is_replaced_by_due_and_edits_rearm_the_right_notification() {
+        let mut db = store();
+        db.save_space(space("home", None)).unwrap();
+        db.set_settings(Settings {
+            notifications: true,
+        })
+        .unwrap();
+        let mut task = crate::schedule::tests::task();
+        task.due_at = "2030-04-01T09:00:00Z".into();
+        task.reminder_minutes = Some(1440);
+        db.save_task(task.clone()).unwrap();
+        let due = parse_time(&task.due_at).unwrap();
+        let notices = db.reminders_at(due + Duration::hours(1)).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, ReminderKind::Due);
+        db.mark_notified(&notices[0]).unwrap();
+        task.reminder_minutes = Some(10);
+        let saved = db.save_task(task.clone()).unwrap();
+        assert!(saved.tasks[0].notified_due_at.is_some());
+        assert!(db.reminders_at(due).unwrap().is_empty());
+        task.due_at = "2030-04-02T09:00:00Z".into();
+        let saved = db.save_task(task).unwrap();
+        assert!(saved.tasks[0].notified_due_at.is_none());
+        assert!(saved.tasks[0].notified_reminder_at.is_none());
+        assert_eq!(
+            db.reminders_at(parse_time("2030-04-02T08:50:00Z").unwrap())
+                .unwrap()[0]
+                .kind,
+            ReminderKind::Advance
+        );
+    }
+
+    #[test]
+    fn advance_settings_survive_backup_recurrence_and_undo() {
+        let mut db = store();
+        db.save_space(space("home", None)).unwrap();
+        let mut task = crate::schedule::tests::task();
+        task.reminder_minutes = Some(10080);
+        db.save_task(task.clone()).unwrap();
+        db.set_settings(Settings {
+            notifications: true,
+        })
+        .unwrap();
+        let at = parse_time(&task.due_at).unwrap() - Duration::days(7);
+        let notice = db.reminders_at(at).unwrap().remove(0);
+        db.mark_notified(&notice).unwrap();
+        assert!(db.snapshot().unwrap().tasks[0]
+            .notified_reminder_at
+            .is_some());
+        let done = db.finish(&task.id, &task.due_at, "completed").unwrap();
+        assert_eq!(done.tasks[0].reminder_minutes, Some(10080));
+        assert!(done.tasks[0].notified_reminder_at.is_none());
+        let bytes = serde_json::to_string(&done).unwrap();
+        let restored: Snapshot = serde_json::from_str(&bytes).unwrap();
+        let mut second = store();
+        second.restore(&restored).unwrap();
+        let reopened = second.reopen(&task.id, &done.records[0].id).unwrap();
+        assert_eq!(reopened.tasks[0].reminder_minutes, Some(10080));
+        assert!(reopened.tasks[0].notified_reminder_at.is_none());
+        assert_eq!(reopened.tasks[0].due_at, task.due_at);
+    }
+
+    #[test]
+    fn legacy_task_json_defaults_to_no_advance_reminder_and_invalid_values_are_rejected() {
+        let mut value = serde_json::to_value(crate::schedule::tests::task()).unwrap();
+        value.as_object_mut().unwrap().remove("reminderMinutes");
+        value.as_object_mut().unwrap().remove("notifiedReminderAt");
+        let legacy: Task = serde_json::from_value(value).unwrap();
+        assert!(legacy.reminder_minutes.is_none());
+        assert!(legacy.notified_reminder_at.is_none());
+        let mut db = store();
+        db.save_space(space("home", None)).unwrap();
+        db.save_task(legacy.clone()).unwrap();
+        let mut invalid = legacy;
+        invalid.reminder_minutes = Some(11);
+        assert!(db.save_task(invalid).is_err());
+        assert_eq!(db.snapshot().unwrap().tasks[0].reminder_minutes, None);
     }
 }

@@ -10,6 +10,7 @@ import {
   ArrowRight,
   ArrowUpRight,
   ArrowUpFromLine,
+  Bell,
   Check,
   CheckCheck,
   ChevronDown,
@@ -39,11 +40,13 @@ import {
   X,
 } from "lucide-react";
 import EntityEditor, { Modal } from "./Editor";
+import TaskCalendar from "./Calendar";
 import { useTheme, type ThemePreference } from "./theme";
 import {
   dateTime,
   expiryLabel,
   localDate,
+  reminderLabel,
   scheduleLabel,
   spacePath,
   taskTarget,
@@ -57,9 +60,11 @@ import {
   type TaskRecord,
 } from "./types";
 
-type Page = "today" | "spaces" | "items" | "tasks" | "history" | "settings";
+type Page =
+  "today" | "calendar" | "spaces" | "items" | "tasks" | "history" | "settings";
 const pageTitles: Record<Page, string> = {
   today: "오늘의 집사",
+  calendar: "달력",
   spaces: "내 공간",
   items: "모든 아이템",
   tasks: "할 일",
@@ -68,11 +73,12 @@ const pageTitles: Record<Page, string> = {
 };
 const pageIndex: Record<Page, string> = {
   today: "01",
-  spaces: "02",
-  items: "03",
-  tasks: "04",
-  history: "05",
-  settings: "06",
+  calendar: "02",
+  spaces: "03",
+  items: "04",
+  tasks: "05",
+  history: "06",
+  settings: "07",
 };
 const themeOptions: [ThemePreference, typeof Monitor, string][] = [
   ["system", Monitor, "시스템 설정"],
@@ -558,6 +564,15 @@ export default function App() {
               </button>
               <div className="task-meta">
                 <span className="schedule-tag">{scheduleLabel(task)}</span>
+                {task.reminderMinutes && (
+                  <span
+                    className="reminder-tag"
+                    title={`미리 알림 ${reminderLabel(task.reminderMinutes)}`}
+                  >
+                    <Bell size={12} />
+                    {reminderLabel(task.reminderMinutes)}
+                  </span>
+                )}
                 <span
                   className={
                     task.active && new Date(task.dueAt) < now ? "overdue" : ""
@@ -701,6 +716,7 @@ export default function App() {
           {(
             [
               ["today", "오늘의 집사"],
+              ["calendar", "달력"],
               ["spaces", "내 공간"],
               ["items", "모든 아이템"],
               ["tasks", "할 일"],
@@ -820,7 +836,9 @@ export default function App() {
             </button>
           </div>
         </header>
-        <main className="main-content">
+        <main
+          className={`main-content ${page === "calendar" && !normalizedQuery ? "calendar-content" : ""}`}
+        >
           {normalizedQuery ? (
             <>
               <div className="page-heading">
@@ -1047,6 +1065,16 @@ export default function App() {
                 </>
               )}
             </>
+          ) : page === "calendar" ? (
+            <TaskCalendar
+              data={data}
+              now={now}
+              busy={busy}
+              onAdd={(dueAt) => openEditor({ kind: "task", dueAt })}
+              onEdit={(task) => openEditor({ kind: "task", value: task })}
+              onFinish={finish}
+              onReopen={reopen}
+            />
           ) : page === "spaces" ? (
             <>
               <div className="page-heading">

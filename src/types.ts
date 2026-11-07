@@ -32,6 +32,18 @@ export interface Task {
   timezone: string;
   active: boolean;
   notifiedDueAt: string | null;
+  reminderMinutes: number | null;
+  notifiedReminderAt: string | null;
+}
+export interface CalendarEvent {
+  id: string;
+  taskId: string;
+  title: string;
+  target: string;
+  scheduledFor: string;
+  kind: "pending" | "projected" | "completed" | "skipped";
+  recordId: string | null;
+  completedAt: string | null;
 }
 export interface TaskRecord {
   id: string;
@@ -70,7 +82,35 @@ export type Editor =
       requiredFor?: "item" | "task";
     }
   | { kind: "item"; value?: Item; spaceId?: string }
-  | { kind: "task"; value?: Task; spaceId?: string; itemId?: string };
+  | {
+      kind: "task";
+      value?: Task;
+      spaceId?: string;
+      itemId?: string;
+      dueAt?: string;
+    };
+
+export const reminderOptions = [
+  { minutes: null, label: "없음" },
+  { minutes: 10, label: "10분 전" },
+  { minutes: 60, label: "1시간 전" },
+  { minutes: 1440, label: "하루 전" },
+  { minutes: 10080, label: "일주일 전" },
+];
+export function reminderLabel(minutes: number | null | undefined) {
+  return (
+    reminderOptions.find((option) => option.minutes === minutes)?.label ??
+    "없음"
+  );
+}
+export function reminderTime(
+  dueAt: string,
+  minutes: number | null | undefined,
+) {
+  if (!minutes) return null;
+  const at = Date.parse(dueAt) - minutes * 60_000;
+  return Number.isFinite(at) ? new Date(at).toISOString() : null;
+}
 
 export function spacePath(spaces: Space[], id: string): string {
   const names: string[] = [],

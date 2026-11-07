@@ -1,5 +1,10 @@
 import { test, expect, type Page } from "@playwright/test";
-import type { ReleaseCheck, Snapshot, Task } from "../../src/types";
+import type {
+  CalendarEvent,
+  ReleaseCheck,
+  Snapshot,
+  Task,
+} from "../../src/types";
 
 const empty: Snapshot = {
   spaces: [],
@@ -21,18 +26,29 @@ async function mockDesktop(
   initial: Snapshot = empty,
   update: { result?: ReleaseCheck; error?: string } = {},
   feedback: { available?: boolean; error?: string } = {},
+  calendar: {
+    events?: CalendarEvent[];
+    error?: string;
+    delayFirst?: number;
+  } = {},
 ) {
   await page.addInitScript(
-    ({ initial, update, feedback }) => {
+    ({ initial, update, feedback, calendar }) => {
       const state = structuredClone(initial);
       const nativeThemes: (string | null)[] = [];
       const updateRequests = { checks: 0, pages: [] as boolean[] };
       const feedbackRequests: Record<string, unknown>[] = [];
+      const calendarRequests: { start: string; end: string }[] = [];
+      const calendarCompleted: number[] = [];
+      const savedTasks: Task[] = [];
       Object.assign(window, {
         isTauri: true,
         __nativeThemes: nativeThemes,
         __updates: updateRequests,
         __feedbackRequests: feedbackRequests,
+        __calendarRequests: calendarRequests,
+        __calendarCompleted: calendarCompleted,
+        __savedTasks: savedTasks,
         __TAURI_INTERNALS__: {
           metadata: {
             currentWindow: { label: "main" },
@@ -40,6 +56,50 @@ async function mockDesktop(
           },
           invoke: async (command: string, args: Record<string, any> = {}) => {
             if (command === "load_data") return structuredClone(state);
+            if (command === "calendar_events") {
+              calendarRequests.push({ start: args.start, end: args.end });
+              const first = calendarRequests.length === 1;
+              const request = calendarRequests.length;
+              if (calendar.error && first) throw calendar.error;
+              const current = state.tasks
+                .filter((task) => task.active)
+                .map((task) => ({
+                  id: `task:${task.id}:${task.dueAt}`,
+                  taskId: task.id,
+                  title: task.title,
+                  target: "우리 집",
+                  scheduledFor: task.dueAt,
+                  kind: "pending",
+                  recordId: null,
+                  completedAt: null,
+                }));
+              const past = state.records.map((record) => ({
+                id: `record:${record.id}`,
+                taskId: record.taskId,
+                title: record.title,
+                target: record.target,
+                scheduledFor: record.scheduledFor,
+                kind: record.outcome,
+                recordId: record.id,
+                completedAt: record.completedAt,
+              }));
+              const response = [...current, ...past, ...(calendar.events ?? [])]
+                .filter(
+                  (event) =>
+                    Date.parse(event.scheduledFor) >= Date.parse(args.start) &&
+                    Date.parse(event.scheduledFor) < Date.parse(args.end),
+                )
+                .sort(
+                  (a, b) =>
+                    Date.parse(a.scheduledFor) - Date.parse(b.scheduledFor),
+                );
+              if (first && calendar.delayFirst)
+                await new Promise((resolve) =>
+                  setTimeout(resolve, calendar.delayFirst),
+                );
+              calendarCompleted.push(request);
+              return response;
+            }
             if (command === "app_info")
               return {
                 version: "0.1.0",
@@ -78,6 +138,7 @@ async function mockDesktop(
                 ...args[kind],
                 id: args[kind].id || crypto.randomUUID(),
               };
+              if (kind === "task") savedTasks.push(structuredClone(value));
               const key = `${kind}s` as "spaces" | "items" | "tasks";
               (state[key] as any[]) = (state[key] as any[])
                 .filter((v) => v.id !== value.id)
@@ -105,6 +166,7 @@ async function mockDesktop(
               task.active = true;
               task.dueAt = record.scheduledFor;
               task.notifiedDueAt = null;
+              task.notifiedReminderAt = null;
               state.records = state.records.filter((r) => r.id !== record.id);
               return structuredClone(state);
             }
@@ -123,7 +185,7 @@ async function mockDesktop(
         },
       });
     },
-    { initial, update, feedback },
+    { initial, update, feedback, calendar },
   );
 }
 
@@ -330,6 +392,8 @@ const cleaning: Task = {
   timezone: "Asia/Seoul",
   active: true,
   notifiedDueAt: null,
+  reminderMinutes: null,
+  notifiedReminderAt: null,
 };
 
 test("reopens a completed task from its check button and deletes it while retaining history", async ({
@@ -622,4 +686,299 @@ test("does not offer feedback until a valid form has been connected", async ({
   await expect(
     page.getByRole("button", { name: "의견 보내기", exact: true }),
   ).toHaveCount(0);
+});
+
+test("saves an advance reminder and previews the actual time without resetting a recurring anchor", async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date("2026-11-08T03:00:00Z"));
+  const task: Task = {
+    ...cleaning,
+    mode: "calendar",
+    anchorAt: "2026-01-31T00:00:00Z",
+    dueAt: "2026-11-30T00:00:00Z",
+  };
+  await mockDesktop(page, { ...empty, spaces: [home], tasks: [task] });
+  await page.goto("/");
+  await page
+    .getByRole("navigation", { name: "주 메뉴" })
+    .getByRole("button", { name: /^할 일/ })
+    .click();
+  await page.locator(".task-body").click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("미리 알림", { exact: true }).selectOption("1440");
+  await expect(dialog.locator(".reminder-preview")).toContainText("11월 29일");
+  await expect(dialog).toContainText("현재 할 일 알림이 꺼져 있어요.");
+  await dialog.getByRole("button", { name: "저장", exact: true }).click();
+  const saved = await page.evaluate(
+    () => (window as unknown as { __savedTasks: Task[] }).__savedTasks[0],
+  );
+  expect(saved.reminderMinutes).toBe(1440);
+  expect(saved.anchorAt).toBe(task.anchorAt);
+  expect(saved.dueAt).toBe(task.dueAt);
+  await expect(page.locator(".reminder-tag")).toHaveText("하루 전");
+});
+
+test("shows a large calendar with overflow, month navigation, keyboard navigation and date-based creation", async ({
+  page,
+}, info) => {
+  await page.clock.setFixedTime(new Date("2026-11-08T03:00:00Z"));
+  const tasks = Array.from({ length: 5 }, (_, index) => ({
+    ...cleaning,
+    id: `task-${index}`,
+    title: [
+      "냉장고 청소",
+      "공기청정기 필터 점검",
+      "비품 수량 확인",
+      "책장 정리",
+      "냉동칸 정리",
+    ][index],
+    dueAt: `2026-11-08T0${index}:00:00Z`,
+  }));
+  await mockDesktop(page, { ...empty, spaces: [home], tasks });
+  await page.goto("/");
+  await page
+    .getByRole("navigation", { name: "주 메뉴" })
+    .getByRole("button", { name: "달력", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "2026년 11월", exact: true }),
+  ).toBeVisible();
+  const grid = page.getByRole("grid", { name: "2026년 11월 할 일 달력" });
+  await expect(grid.getByRole("gridcell")).toHaveCount(35);
+  await expect(grid).toHaveAttribute("aria-busy", "false");
+  expect((await grid.boundingBox())!.width).toBeGreaterThan(700);
+  const heights = await grid
+    .locator("tbody tr")
+    .evaluateAll((rows) =>
+      rows.map((row) => row.getBoundingClientRect().height),
+    );
+  expect(Math.max(...heights) - Math.min(...heights)).toBeLessThan(2);
+  await page.screenshot({ path: info.outputPath("calendar-light.png") });
+  await page.getByRole("button", { name: "다크 테마로 전환" }).click();
+  await page.screenshot({ path: info.outputPath("calendar-dark.png") });
+  await page
+    .getByRole("button", { name: /11월 8일.*일정 3개 더 보기/ })
+    .click();
+  let dialog = page.getByRole("dialog");
+  await expect(dialog.locator(".calendar-agenda-item")).toHaveCount(5);
+  await page.screenshot({ path: info.outputPath("calendar-agenda.png") });
+  await dialog.getByRole("button", { name: "닫기", exact: true }).click();
+  await page.getByRole("button", { name: "다음 달", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "2026년 12월", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "다음 달", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "2027년 1월", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("grid").getByRole("gridcell")).toHaveCount(42);
+  await page.getByRole("button", { name: "오늘", exact: true }).click();
+  const today = page.locator("button[data-date='2026-11-08']");
+  await today.focus();
+  await today.press("ArrowRight");
+  await expect(page.locator("button[data-date='2026-11-09']")).toBeFocused();
+  await page.locator("button[data-date='2026-11-01']").focus();
+  await page.locator("button[data-date='2026-11-01']").press("PageDown");
+  await expect(
+    page.getByRole("heading", { name: "2026년 12월", exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("button[data-date='2026-12-01']")).toBeFocused();
+  await page.locator("button[data-date='2026-12-01']").press("Enter");
+  dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("이날 예정된 할 일이 없어요");
+  await dialog.getByRole("button", { name: "할 일 추가", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByRole("heading", { name: "할 일 추가", exact: true }),
+  ).toBeVisible();
+  await expect(dialog.getByLabel(/^다음 예정일/)).toHaveValue(
+    "2026-12-01T09:00",
+  );
+});
+
+test("completes and reopens a calendar occurrence while projected occurrences cannot complete a different due date", async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date("2026-11-08T03:00:00Z"));
+  const once = { ...cleaning, dueAt: "2026-11-08T00:00:00Z" };
+  const repeating: Task = {
+    ...cleaning,
+    id: "repeat",
+    title: "주간 청소",
+    mode: "calendar",
+    dueAt: "2026-11-01T00:00:00Z",
+  };
+  const projection: CalendarEvent = {
+    id: "projection",
+    taskId: "repeat",
+    title: repeating.title,
+    target: "우리 집",
+    scheduledFor: "2026-11-15T00:00:00Z",
+    kind: "projected",
+    recordId: null,
+    completedAt: null,
+  };
+  await mockDesktop(
+    page,
+    { ...empty, spaces: [home], tasks: [once, repeating] },
+    {},
+    {},
+    { events: [projection] },
+  );
+  await page.goto("/");
+  await page
+    .getByRole("navigation", { name: "주 메뉴" })
+    .getByRole("button", { name: "달력", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "09:00 냉장고 청소 예정", exact: true })
+    .click();
+  let dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "완료", exact: true }).click();
+  await expect(
+    dialog.getByRole("button", { name: "완료 취소", exact: true }),
+  ).toBeVisible();
+  await dialog.getByRole("button", { name: "완료 취소", exact: true }).click();
+  await expect(
+    dialog.getByRole("button", { name: "완료", exact: true }),
+  ).toBeVisible();
+  await dialog.getByRole("button", { name: "닫기", exact: true }).click();
+  await page
+    .getByRole("button", { name: "09:00 주간 청소 반복 예정", exact: true })
+    .click();
+  dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("반복 규칙으로 미리 표시한 회차예요.");
+  await expect(
+    dialog.getByRole("button", { name: "완료", exact: true }),
+  ).toHaveCount(0);
+  await dialog
+    .getByRole("button", { name: "현재 회차 보기", exact: true })
+    .click();
+  await expect(dialog.getByRole("heading", { level: 2 })).toContainText(
+    "11월 1일",
+  );
+  await expect(
+    dialog.getByRole("button", { name: "완료", exact: true }),
+  ).toBeVisible();
+  await dialog
+    .getByRole("button", { name: "반복 할 일 수정", exact: true })
+    .click();
+  await expect(
+    page
+      .getByRole("dialog")
+      .getByRole("heading", { name: "할 일 수정", exact: true }),
+  ).toBeVisible();
+});
+
+test("can retry a failed calendar load and navigate after recovery", async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date("2026-11-08T03:00:00Z"));
+  const december = { ...cleaning, dueAt: "2026-12-10T00:00:00Z" };
+  await mockDesktop(
+    page,
+    { ...empty, spaces: [home], tasks: [december] },
+    {},
+    {},
+    { error: "달력을 읽지 못했어요.", delayFirst: 250 },
+  );
+  await page.goto("/");
+  await page
+    .getByRole("navigation", { name: "주 메뉴" })
+    .getByRole("button", { name: "달력", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("달력을 읽지 못했어요.");
+  await page.getByRole("button", { name: "다시 시도", exact: true }).click();
+  await expect(page.getByRole("grid")).toHaveAttribute("aria-busy", "false");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.getByRole("button", { name: "다음 달", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "09:00 냉장고 청소 예정", exact: true }),
+  ).toBeVisible();
+});
+
+test("does not replace the current month with a stale calendar response", async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date("2026-11-08T03:00:00Z"));
+  await mockDesktop(
+    page,
+    {
+      ...empty,
+      spaces: [home],
+      tasks: [{ ...cleaning, dueAt: "2026-12-10T00:00:00Z" }],
+    },
+    {},
+    {},
+    { delayFirst: 500 },
+  );
+  await page.goto("/");
+  await page
+    .getByRole("navigation", { name: "주 메뉴" })
+    .getByRole("button", { name: "달력", exact: true })
+    .click();
+  await expect(page.getByRole("grid")).toHaveAttribute("aria-busy", "true");
+  await page.getByRole("button", { name: "다음 달", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "09:00 냉장고 청소 예정", exact: true }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __calendarCompleted: number[] })
+            .__calendarCompleted,
+      ),
+    )
+    .toContain(1);
+  await expect(
+    page.getByRole("heading", { name: "2026년 12월", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "09:00 냉장고 청소 예정", exact: true }),
+  ).toBeVisible();
+});
+
+test("keeps a six-week calendar readable at the minimum window size", async ({
+  page,
+}, info) => {
+  await page.setViewportSize({ width: 920, height: 640 });
+  await page.clock.setFixedTime(new Date("2027-01-10T03:00:00Z"));
+  const tasks = Array.from({ length: 5 }, (_, index) => ({
+    ...cleaning,
+    id: `narrow-${index}`,
+    title: `긴 이름의 공간 관리 일정 ${index + 1}`,
+    dueAt: `2027-01-10T0${index}:00:00Z`,
+  }));
+  await mockDesktop(page, { ...empty, spaces: [home], tasks });
+  await page.goto("/");
+  await page
+    .getByRole("navigation", { name: "주 메뉴" })
+    .getByRole("button", { name: "달력", exact: true })
+    .click();
+  const grid = page.getByRole("grid");
+  await expect(grid).toHaveAttribute("aria-busy", "false");
+  await expect(grid.getByRole("gridcell")).toHaveCount(42);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  const heights = await grid
+    .locator("tbody tr")
+    .evaluateAll((rows) =>
+      rows.map((row) => row.getBoundingClientRect().height),
+    );
+  expect(Math.max(...heights) - Math.min(...heights)).toBeLessThan(2);
+  await page.screenshot({ path: info.outputPath("calendar-narrow.png") });
+  await page.locator("button[data-date='2027-01-10']").click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.locator(".calendar-agenda-item")).toHaveCount(5);
+  await dialog
+    .getByRole("button", { name: "완료", exact: true })
+    .scrollIntoViewIfNeeded();
+  await expect(
+    dialog.getByRole("button", { name: "완료", exact: true }),
+  ).toBeInViewport();
 });

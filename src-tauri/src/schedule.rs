@@ -95,6 +95,8 @@ pub(crate) mod tests {
             timezone: "Asia/Seoul".into(),
             active: true,
             notified_due_at: None,
+            reminder_minutes: None,
+            notified_reminder_at: None,
         }
     }
 

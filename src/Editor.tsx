@@ -1,18 +1,28 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ImagePlus, Info, Trash2, X } from "lucide-react";
 import type { Editor, Item, Snapshot, Space, Task } from "./types";
-import { localInput, spacePath, units } from "./types";
+import {
+  dateTime,
+  localInput,
+  reminderOptions,
+  reminderTime,
+  spacePath,
+  units,
+} from "./types";
 
 export function Modal({
   title,
   children,
   onClose,
+  className = "",
 }: {
   title: string;
   children: React.ReactNode;
   onClose: () => void;
+  className?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
   useEffect(() => {
     const d = ref.current!;
     d.showModal();
@@ -21,14 +31,15 @@ export function Modal({
   return (
     <dialog
       ref={ref}
-      className="modal"
+      className={`modal ${className}`}
+      aria-labelledby={titleId}
       onCancel={(e) => {
         e.preventDefault();
         onClose();
       }}
     >
       <div className="modal-heading">
-        <h2>{title}</h2>
+        <h2 id={titleId}>{title}</h2>
         <button
           className="icon-button"
           type="button"
@@ -94,6 +105,19 @@ export default function EntityEditor({
   const [mode, setMode] = useState(
     editor.kind === "task" ? (editor.value?.mode ?? "once") : "once",
   );
+  const [dueInput, setDueInput] = useState(() =>
+    editor.kind === "task"
+      ? localInput(
+          editor.value?.dueAt ??
+            editor.dueAt ??
+            new Date(Date.now() + 3600000).toISOString(),
+        )
+      : "",
+  );
+  const [reminderMinutes, setReminderMinutes] = useState<number | null>(
+    editor.kind === "task" ? (editor.value?.reminderMinutes ?? null) : null,
+  );
+  const previewReminder = reminderTime(dueInput, reminderMinutes);
   const [targetKind, setTargetKind] = useState(
     editor.kind === "task" && (editor.itemId || editor.value?.itemId)
       ? "item"
@@ -189,6 +213,8 @@ export default function EntityEditor({
             : editor.value!.timezone,
           active: f.get("active") === "on",
           notifiedDueAt: null,
+          reminderMinutes,
+          notifiedReminderAt: null,
         });
       }
     } catch (e) {
@@ -488,16 +514,47 @@ export default function EntityEditor({
                   name="dueAt"
                   type="datetime-local"
                   required
-                  defaultValue={localInput(
-                    editor.value?.dueAt ??
-                      new Date(Date.now() + 3600000).toISOString(),
-                  )}
+                  value={dueInput}
+                  onChange={(event) => setDueInput(event.target.value)}
                 />
                 <span className="field-hint">
                   현재 컴퓨터 시간대 ·{" "}
                   {Intl.DateTimeFormat().resolvedOptions().timeZone}
                 </span>
               </label>
+              <label>
+                미리 알림
+                <select
+                  aria-label="미리 알림"
+                  value={reminderMinutes ?? ""}
+                  onChange={(event) =>
+                    setReminderMinutes(
+                      event.target.value === ""
+                        ? null
+                        : Number(event.target.value),
+                    )
+                  }
+                >
+                  {reminderOptions.map((option) => (
+                    <option
+                      key={option.minutes ?? "none"}
+                      value={option.minutes ?? ""}
+                    >
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="reminder-preview" aria-live="polite">
+                {previewReminder
+                  ? `${dateTime(previewReminder)}에 미리 알려드려요. 예정 시각에도 한 번 더 알려드려요.`
+                  : "예정 시각에 알려드려요. 미리 알림을 선택하면 그 전에 한 번 더 알려드려요."}
+              </p>
+              <p className="field-hint reminder-hint">
+                {data.settings.notifications
+                  ? "앱이 실행 중일 때 알림을 보내요. 메뉴 막대·트레이에 상주하는 동안에도 받을 수 있어요."
+                  : "현재 할 일 알림이 꺼져 있어요. 저장 후 설정에서 할 일 알림을 켜 주세요."}
+              </p>
               {mode !== "once" && (
                 <div className="form-row">
                   <label>
