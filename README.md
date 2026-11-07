@@ -44,6 +44,7 @@ xattr -dr com.apple.quarantine /Applications/Zipsa.app
 - 공간·아이템별 할 일, 일회성·날짜 기준·완료일 기준 반복 일정
 - 할 일 알림과 완료 이력, 전체 검색, 로컬 백업·복원
 - 최신 버전 확인과 GitHub 다운로드 페이지 연결
+- 앱 설정에서 Google 설문지로 의견 보내기
 
 [공간·아이템·할 일의 관계 한눈에 보기](assets/community/zipsa-concepts-v1.png)
 
@@ -62,7 +63,8 @@ npm run desktop
 
 ## 참여
 
-버그 제보와 기능 제안은 [Issues](https://github.com/cwon/zipsa/issues)에 남겨 주세요. PR도 환영합니다.
+불편한 점과 기능 제안은 [의견 보내기](https://docs.google.com/forms/d/e/1FAIpQLSfeuuXiUu_BCWlc4_tnlmNma9HAtdgCO2Yxhy1kQfBDYvP4Cg/viewform)에 남겨 주세요. 앱 설정에서도 열 수 있습니다.
+공개 버그 제보는 [Issues](https://github.com/cwon/zipsa/issues), 코드 기여는 PR을 이용해 주세요.
 
 ## 라이선스
 

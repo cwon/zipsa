@@ -1,3 +1,4 @@
+mod feedback;
 mod models;
 mod schedule;
 mod store;
@@ -36,12 +37,17 @@ fn lock(db: &Db) -> Result<std::sync::MutexGuard<'_, store::Store>> {
 struct AppInfo {
     version: String,
     data_path: String,
+    os: String,
+    feedback_available: bool,
 }
 
 #[tauri::command]
 fn app_info(app: tauri::AppHandle) -> Result<AppInfo> {
+    let version = app.package_info().version.to_string();
     Ok(AppInfo {
-        version: app.package_info().version.to_string(),
+        feedback_available: feedback::form_url(&version).is_ok(),
+        version,
+        os: feedback::platform_label().to_string(),
         data_path: app
             .path()
             .app_data_dir()
@@ -49,6 +55,14 @@ fn app_info(app: tauri::AppHandle) -> Result<AppInfo> {
             .display()
             .to_string(),
     })
+}
+
+#[tauri::command]
+fn open_feedback_form(app: tauri::AppHandle) -> Result<()> {
+    let url = feedback::form_url(&app.package_info().version.to_string())?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "의견 접수창을 열지 못했어요. 기본 브라우저 설정을 확인해 주세요.".into())
 }
 
 #[tauri::command]
@@ -256,6 +270,7 @@ pub fn run() {
         ))
         .invoke_handler(tauri::generate_handler![
             app_info,
+            open_feedback_form,
             check_latest_release,
             open_download_page,
             load_data,

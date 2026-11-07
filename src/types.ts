@@ -53,6 +53,8 @@ export interface Snapshot {
 export interface AppInfo {
   version: string;
   dataPath: string;
+  os: string;
+  feedbackAvailable: boolean;
 }
 export interface ReleaseCheck {
   latestVersion: string | null;

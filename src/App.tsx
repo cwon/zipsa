@@ -24,6 +24,7 @@ import {
   Leaf,
   LoaderCircle,
   MapPin,
+  MessageSquare,
   Monitor,
   Moon,
   Package,
@@ -171,6 +172,7 @@ export default function App() {
   const [updateMessage, setUpdateMessage] = useState("");
   const [updateError, setUpdateError] = useState(false);
   const [releaseCheck, setReleaseCheck] = useState<ReleaseCheck | null>(null);
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
   const theme = useTheme();
 
   async function load() {
@@ -373,6 +375,16 @@ export default function App() {
       await invoke("open_download_page", { latest });
     } catch (e) {
       notifyError(e);
+    }
+  }
+  async function openFeedbackForm() {
+    setFeedbackBusy(true);
+    try {
+      await invoke("open_feedback_form");
+    } catch (e) {
+      notifyError(e);
+    } finally {
+      setFeedbackBusy(false);
     }
   }
 
@@ -1507,6 +1519,40 @@ export default function App() {
                     <ExternalLink size={13} />
                   </button>
                 </section>
+                {info?.feedbackAvailable && (
+                  <section
+                    className="panel settings-section"
+                    aria-labelledby="feedback-heading"
+                  >
+                    <div className="section-heading">
+                      <h2 id="feedback-heading">의견을 들려주세요</h2>
+                    </div>
+                    <p className="setting-description">
+                      불편한 점이나 바라는 기능을 Google 설문지에 남겨 주세요.
+                      답변받을 이메일은 선택해서 적을 수 있어요.
+                    </p>
+                    <p className="field-hint">
+                      폼을 열면 앱 버전 v{info.version}과 운영체제 {info.os}를
+                      미리 채워요. 공간·아이템·사진·할 일 정보는 함께 보내지
+                      않아요.
+                    </p>
+                    <p className="field-hint">
+                      의견은 브라우저에서 직접 작성하고 제출해요. 제출한 내용은
+                      Google Forms에 저장되며 집사 개발자가 확인해요.
+                    </p>
+                    <div className="setting-actions">
+                      <button
+                        className="button secondary"
+                        disabled={feedbackBusy}
+                        onClick={() => void openFeedbackForm()}
+                      >
+                        <MessageSquare size={16} />
+                        {feedbackBusy ? "브라우저 여는 중…" : "의견 보내기"}
+                        <ExternalLink size={13} />
+                      </button>
+                    </div>
+                  </section>
+                )}
                 <div className="app-signature">
                   <span className="brand-mark small" aria-hidden="true">
                     집

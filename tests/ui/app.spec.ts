@@ -20,16 +20,19 @@ async function mockDesktop(
   page: Page,
   initial: Snapshot = empty,
   update: { result?: ReleaseCheck; error?: string } = {},
+  feedback: { available?: boolean; error?: string } = {},
 ) {
   await page.addInitScript(
-    ({ initial, update }) => {
+    ({ initial, update, feedback }) => {
       const state = structuredClone(initial);
       const nativeThemes: (string | null)[] = [];
       const updateRequests = { checks: 0, pages: [] as boolean[] };
+      const feedbackRequests: Record<string, unknown>[] = [];
       Object.assign(window, {
         isTauri: true,
         __nativeThemes: nativeThemes,
         __updates: updateRequests,
+        __feedbackRequests: feedbackRequests,
         __TAURI_INTERNALS__: {
           metadata: {
             currentWindow: { label: "main" },
@@ -41,7 +44,14 @@ async function mockDesktop(
               return {
                 version: "0.1.0",
                 dataPath: "/local/Zipsa",
+                os: "macOS",
+                feedbackAvailable: feedback.available ?? false,
               };
+            if (command === "open_feedback_form") {
+              feedbackRequests.push(args);
+              if (feedback.error) throw feedback.error;
+              return null;
+            }
             if (command === "plugin:autostart|is_enabled") return false;
             if (command === "plugin:window|set_theme") {
               nativeThemes.push(args.value);
@@ -113,7 +123,7 @@ async function mockDesktop(
         },
       });
     },
-    { initial, update },
+    { initial, update, feedback },
   );
 }
 
@@ -538,4 +548,78 @@ test("allows retry and direct release-page navigation after a failed version che
     .getByRole("button", { name: "GitHub 릴리스 보기", exact: true })
     .click();
   expect((await updateRequests(page)).pages).toEqual([false]);
+});
+
+test("opens feedback only on request without including local data or a frontend URL", async ({
+  page,
+}) => {
+  await mockDesktop(
+    page,
+    { ...empty, spaces: [home] },
+    {},
+    { available: true },
+  );
+  await page.goto("/");
+  await page.getByRole("button", { name: /^설정/ }).click();
+  const section = page.getByRole("region", { name: "의견을 들려주세요" });
+  await expect(section).toContainText("앱 버전 v0.1.0과 운영체제 macOS");
+  await expect(section).toContainText("Google Forms에 저장");
+  await expect(section).toContainText(
+    "공간·아이템·사진·할 일 정보는 함께 보내지",
+  );
+  const requests = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __feedbackRequests: unknown[] })
+          .__feedbackRequests,
+    );
+  expect(await requests()).toEqual([]);
+  await section
+    .getByRole("button", { name: "의견 보내기", exact: true })
+    .click();
+  expect(await requests()).toEqual([{}]);
+});
+
+test("allows feedback to be retried after the browser fails to open", async ({
+  page,
+}) => {
+  await mockDesktop(
+    page,
+    empty,
+    {},
+    {
+      available: true,
+      error: "의견 접수창을 열지 못했어요. 기본 브라우저 설정을 확인해 주세요.",
+    },
+  );
+  await page.goto("/");
+  await page.getByRole("button", { name: /^설정/ }).click();
+  const button = page.getByRole("button", { name: "의견 보내기", exact: true });
+  await button.click();
+  await expect(page.getByRole("alert")).toContainText(
+    "의견 접수창을 열지 못했어요.",
+  );
+  await expect(button).toBeEnabled();
+  await button.click();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __feedbackRequests: unknown[] })
+          .__feedbackRequests.length,
+    ),
+  ).toBe(2);
+});
+
+test("does not offer feedback until a valid form has been connected", async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: /^설정/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "의견을 들려주세요" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "의견 보내기", exact: true }),
+  ).toHaveCount(0);
 });
