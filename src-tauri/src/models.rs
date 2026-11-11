@@ -10,7 +10,7 @@ pub struct Space {
     pub notes: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     pub id: String,
@@ -19,11 +19,34 @@ pub struct Item {
     pub quantity: f64,
     pub unit: String,
     pub notes: String,
+    /// Ids of stored photos. The first one is the cover shown in lists.
+    #[serde(default)]
+    pub photos: Vec<String>,
+    /// Only read from data written before schema v3, which had one photo per
+    /// item. It is moved into `photos` on upgrade and never written again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub photo: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
     pub expires_on: Option<String>,
     pub purchased_on: Option<String>,
     pub purchase_store: String,
     pub purchase_price: Option<i64>,
+    #[serde(default)]
+    pub warranty_until: Option<String>,
+}
+
+/// A document kept with an item, such as a receipt, warranty or manual.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    /// Only set by the editor for a newly added file (a data URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

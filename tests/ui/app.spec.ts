@@ -42,7 +42,13 @@ async function mockDesktop(
       const calendarCompleted: number[] = [];
       const savedTasks: Task[] = [];
       const backupFolderOpens: number[] = [];
+      const savedItems: Record<string, any>[] = [];
+      const snoozes: Record<string, unknown>[] = [];
+      const openedAttachments: string[] = [];
       Object.assign(window, {
+        __savedItems: savedItems,
+        __snoozes: snoozes,
+        __openedAttachments: openedAttachments,
         isTauri: true,
         __nativeThemes: nativeThemes,
         __updates: updateRequests,
@@ -157,6 +163,21 @@ async function mockDesktop(
                 id: args[kind].id || crypto.randomUUID(),
               };
               if (kind === "task") savedTasks.push(structuredClone(value));
+              if (kind === "item") {
+                savedItems.push(structuredClone(value));
+                // 실제 앱처럼 새 파일에는 식별자를 주고 내용은 돌려주지 않는다.
+                value.photos = value.photos.map((photo: string) =>
+                  photo.startsWith("data:")
+                    ? `photo-${crypto.randomUUID()}`
+                    : photo,
+                );
+                value.attachments = value.attachments.map(
+                  ({ data, ...file }: Record<string, any>) =>
+                    data
+                      ? { ...file, id: `file-${crypto.randomUUID()}` }
+                      : file,
+                );
+              }
               const key = `${kind}s` as "spaces" | "items" | "tasks";
               (state[key] as any[]) = (state[key] as any[])
                 .filter((v) => v.id !== value.id)
@@ -177,6 +198,18 @@ async function mockDesktop(
                 taskAfter: structuredClone(task),
               });
               return structuredClone(state);
+            }
+            if (command === "snooze_task") {
+              snoozes.push(structuredClone(args));
+              const task = state.tasks.find((t) => t.id === args.id)!;
+              if (task.dueAt !== args.expectedDue)
+                throw "이미 처리된 일정입니다. 목록을 새로 확인해 주세요.";
+              task.dueAt = args.dueAt;
+              return structuredClone(state);
+            }
+            if (command === "open_attachment") {
+              openedAttachments.push(args.id);
+              return null;
             }
             if (command === "reopen_task") {
               const record = state.records.find((r) => r.id === args.recordId)!;
@@ -250,7 +283,7 @@ test("saves a photo and purchase details, binds an item task, and shows history"
   await page.getByLabel("구매처").fill("동네 마트");
   await page.getByLabel("구매 금액 (원)").fill("4800");
   await page.getByLabel("유통기한").fill("2099-12-31");
-  await page.locator("input[type=file]").setInputFiles({
+  await page.getByLabel("사진 추가").setInputFiles({
     name: "milk.png",
     mimeType: "image/png",
     buffer: Buffer.from(
@@ -297,11 +330,13 @@ test("loads stored photos by id and shows automatic backups", async ({
         quantity: 1,
         unit: "개",
         notes: "",
-        photo: "photo-1",
+        photos: ["photo-1"],
+        attachments: [],
         expiresOn: null,
         purchasedOn: null,
         purchaseStore: "",
         purchasePrice: null,
+        warrantyUntil: null,
       },
     ],
   });
@@ -1105,4 +1140,172 @@ test("keeps a six-week calendar readable at the minimum window size", async ({
   await expect(
     dialog.getByRole("button", { name: "완료", exact: true }),
   ).toBeInViewport();
+});
+
+test("snoozes the current occurrence from the task list and the calendar", async ({
+  page,
+}, info) => {
+  await page.clock.setFixedTime(new Date("2026-11-08T03:00:00Z"));
+  await mockDesktop(page, { ...empty, spaces: [home], tasks: [cleaning] });
+  await page.goto("/");
+  // 어제 오전 9시 일정이라 오늘을 기준으로 같은 시각으로 미룬다.
+  const snooze = page.getByRole("button", {
+    name: "냉장고 청소 미루기",
+    exact: true,
+  });
+  await expect(
+    page.getByText("오늘 챙길 일을 모두 마쳤어요. 편안하게 쉬세요."),
+  ).toBeHidden();
+  await snooze.click();
+  const menu = page.getByRole("menu", { name: "냉장고 청소 미루기" });
+  await expect(menu.getByRole("menuitem")).toHaveText([
+    /1시간.*11월 8일 오후 01:00/,
+    /하루.*11월 9일 오전 09:00/,
+    /3일.*11월 11일 오전 09:00/,
+    /일주일.*11월 15일 오전 09:00/,
+  ]);
+  await page.screenshot({ path: info.outputPath("snooze.png") });
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(snooze).toBeFocused();
+  await snooze.click();
+  await menu.getByRole("menuitem", { name: /하루/ }).click();
+  await expect(page.getByRole("status")).toHaveText(
+    "11월 9일 오전 09:00로 미뤘어요.",
+  );
+  // 내일로 미뤘으므로 오늘 챙길 일에서 빠진다.
+  await expect(
+    page.getByText("오늘 챙길 일을 모두 마쳤어요. 편안하게 쉬세요."),
+  ).toBeVisible();
+
+  await page
+    .getByRole("navigation", { name: "주 메뉴" })
+    .getByRole("button", { name: "달력", exact: true })
+    .click();
+  await page.locator('button[data-date="2026-11-09"]').click();
+  const drawer = page.getByRole("dialog");
+  await drawer.getByRole("button", { name: "냉장고 청소 미루기" }).click();
+  // 아직 오지 않은 일정은 예정일을 기준으로 미룬다.
+  await drawer.getByRole("menuitem", { name: /3일.*11월 12일/ }).click();
+  await expect(page.getByRole("status")).toHaveText(
+    "11월 12일 오전 09:00로 미뤘어요.",
+  );
+  expect(
+    await page.evaluate(() => (window as any).__snoozes as unknown[]),
+  ).toEqual([
+    {
+      id: "cleaning",
+      expectedDue: "2026-11-07T00:00:00Z",
+      dueAt: "2026-11-09T00:00:00.000Z",
+    },
+    {
+      id: "cleaning",
+      expectedDue: "2026-11-09T00:00:00.000Z",
+      dueAt: "2026-11-12T00:00:00.000Z",
+    },
+  ]);
+});
+
+test("keeps several photos, attachments and a warranty date with an item", async ({
+  page,
+}, info) => {
+  await mockDesktop(page, {
+    ...empty,
+    spaces: [home],
+    items: [
+      {
+        id: "tv",
+        spaceId: "home",
+        name: "TV",
+        quantity: 1,
+        unit: "대",
+        notes: "",
+        photos: ["photo-1", "photo-2"],
+        attachments: [
+          {
+            id: "file-1",
+            name: "보증서.pdf",
+            mime: "application/pdf",
+            size: 204800,
+          },
+        ],
+        expiresOn: null,
+        purchasedOn: null,
+        purchaseStore: "",
+        purchasePrice: null,
+        warrantyUntil: null,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "모든 아이템", exact: true }).click();
+  await expect(page.getByText("사진 2장")).toBeVisible();
+  await expect(page.getByText("첨부 1개")).toBeVisible();
+  // 첨부 파일 이름으로도 아이템을 찾을 수 있다.
+  await page.getByLabel("공간, 아이템, 할 일 검색").fill("보증서");
+  await page.getByRole("button", { name: /^TV/ }).click();
+  const editor = page.getByRole("dialog", { name: "아이템 수정" });
+
+  await editor.getByRole("button", { name: "사진 2", exact: true }).click();
+  await expect(
+    editor.getByRole("img", { name: "아이템 사진" }),
+  ).toHaveAttribute("src", "zipsa-photo://localhost/photo-2");
+  await editor.getByRole("button", { name: "대표 사진으로" }).click();
+  await expect(
+    editor.getByRole("button", { name: "사진 1 (대표)" }),
+  ).toHaveAttribute("aria-pressed", "true");
+
+  await expect(editor.getByText("200KB")).toBeVisible();
+  await editor.getByRole("button", { name: "보증서.pdf 열기" }).click();
+  expect(
+    await page.evaluate(() => (window as any).__openedAttachments as string[]),
+  ).toEqual(["file-1"]);
+  await editor.getByLabel("파일 추가").setInputFiles([
+    {
+      name: "영수증.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from("%PDF-1.4\n"),
+    },
+    { name: "메모.txt", mimeType: "text/plain", buffer: Buffer.from("x") },
+  ]);
+  await expect(editor.getByRole("alert")).toHaveText(
+    /메모.txt: PDF·JPEG·PNG·WebP 파일을 선택해 주세요/,
+  );
+  // 저장하기 전의 파일은 아직 열 수 없다.
+  await expect(editor.getByText("저장하면 열 수 있어요")).toBeVisible();
+  await expect(
+    editor.getByRole("button", { name: "영수증.pdf 열기" }),
+  ).toHaveCount(0);
+  await editor.getByLabel("보증 만료일").fill("2099-12-31");
+  await editor.screenshot({ path: info.outputPath("item-files.png") });
+  await editor.getByRole("button", { name: "저장", exact: true }).click();
+
+  const saved = await page.evaluate(() => (window as any).__savedItems[0]);
+  expect(saved.photos).toEqual(["photo-2", "photo-1"]);
+  expect(saved.warrantyUntil).toBe("2099-12-31");
+  expect(saved.attachments).toEqual([
+    {
+      id: "file-1",
+      name: "보증서.pdf",
+      mime: "application/pdf",
+      size: 204800,
+    },
+    {
+      id: "",
+      name: "영수증.pdf",
+      mime: "application/pdf",
+      size: 9,
+      data: "data:application/pdf;base64,JVBERi0xLjQK",
+    },
+  ]);
+  await expect(
+    page.getByRole("img", { name: "TV", exact: true }),
+  ).toHaveAttribute("src", "zipsa-photo://localhost/photo-2");
+  await expect(page.getByText("첨부 2개")).toBeVisible();
+  await expect(page.getByText(/^보증 [\d,]+일 남음$/)).toBeVisible();
+  // 저장한 뒤에는 새 파일도 열 수 있다.
+  await page.getByRole("button", { name: /^TV/ }).click();
+  await expect(
+    editor.getByRole("button", { name: "영수증.pdf 열기" }),
+  ).toBeVisible();
 });

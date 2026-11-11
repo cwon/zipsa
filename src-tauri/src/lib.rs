@@ -45,10 +45,14 @@ fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf> {
 /// (`zipsa-photo://localhost/<id>`), so data loads never carry photo bytes.
 const PHOTO_SCHEME: &str = "zipsa-photo";
 
-fn stored_photo(app: &tauri::AppHandle, id: &str) -> Option<store::Photo> {
+fn stored_photo(app: &tauri::AppHandle, id: &str) -> Option<store::StoredFile> {
     let state = app.try_state::<Db>()?;
     let db = lock(&state).ok()?;
-    db.photo(id).ok().flatten()
+    // Attached documents are opened through `open_attachment`, never in the webview.
+    db.file(id)
+        .ok()
+        .flatten()
+        .filter(|file| file.mime.starts_with("image/"))
 }
 
 fn photo_response(app: &tauri::AppHandle, id: &str) -> Response<Vec<u8>> {
@@ -154,6 +158,15 @@ fn finish_task(
     lock(&db)?.finish(&id, &expected_due, &outcome)
 }
 #[tauri::command]
+fn snooze_task(
+    db: State<'_, Db>,
+    id: String,
+    expected_due: String,
+    due_at: String,
+) -> Result<Snapshot> {
+    lock(&db)?.snooze(&id, &expected_due, &due_at)
+}
+#[tauri::command]
 fn reopen_task(db: State<'_, Db>, id: String, record_id: String) -> Result<Snapshot> {
     lock(&db)?.reopen(&id, &record_id)
 }
@@ -228,6 +241,74 @@ fn open_backup_folder(app: tauri::AppHandle) -> Result<()> {
     app.opener()
         .open_path(dir.display().to_string(), None::<&str>)
         .map_err(|_| "백업 폴더를 열지 못했어요.".into())
+}
+
+fn attachment_dir(app: &tauri::AppHandle) -> Result<PathBuf> {
+    Ok(app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("attachments"))
+}
+
+/// The file name used for the temporary copy. The extension always comes from
+/// the verified file type, so a misleading name cannot choose which program
+/// opens the file.
+fn attachment_file_name(name: &str, mime: &str) -> String {
+    let extension = match mime {
+        "application/pdf" => "pdf",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => "jpg",
+    };
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    let stem: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_control() || "/\\:*?\"<>|".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(80)
+        .collect();
+    let stem = stem.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    format!(
+        "{}.{extension}",
+        if stem.is_empty() { "첨부" } else { stem }
+    )
+}
+
+/// Opens an attachment in the default app for its type. The database keeps
+/// the bytes, so a copy is written to the cache folder first. Copies are
+/// removed the next time the app starts.
+#[tauri::command]
+fn open_attachment(app: tauri::AppHandle, db: State<'_, Db>, id: String) -> Result<()> {
+    const MISSING: &str = "첨부 파일을 찾을 수 없습니다.";
+    let (name, file) = {
+        let db = lock(&db)?;
+        let data = db.snapshot()?;
+        let attachment = data
+            .items
+            .iter()
+            .flat_map(|item| &item.attachments)
+            .find(|a| a.id == id)
+            .ok_or(MISSING)?;
+        (
+            attachment_file_name(&attachment.name, &attachment.mime),
+            db.file(&id)?.ok_or(MISSING)?,
+        )
+    };
+    // Ids are created by the app, but a restored backup could carry any text.
+    let folder: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let dir = attachment_dir(&app)?.join(if folder.is_empty() { "file" } else { &folder });
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(name);
+    fs::write(&path, file.data).map_err(|e| format!("첨부 파일을 열지 못했어요. {e}"))?;
+    app.opener()
+        .open_path(path.display().to_string(), None::<&str>)
+        .map_err(|_| "첨부 파일을 열지 못했어요. 이 형식을 여는 기본 앱을 확인해 주세요.".into())
 }
 
 fn show_main(app: &tauri::AppHandle) {
@@ -359,17 +440,23 @@ pub fn run() {
             save_task,
             delete_entity,
             finish_task,
+            snooze_task,
             reopen_task,
             save_settings,
             export_backup,
             import_backup,
             auto_backup_status,
-            open_backup_folder
+            open_backup_folder,
+            open_attachment
         ])
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             app.manage(Mutex::new(store::Store::open(&dir.join("zipsa.sqlite"))?));
+            // Temporary copies made to open attachments in other apps.
+            if let Ok(copies) = attachment_dir(app.handle()) {
+                let _ = fs::remove_dir_all(copies);
+            }
             let open = MenuItem::with_id(app, "open", "집사 열기", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "집사 종료", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
@@ -410,4 +497,26 @@ pub fn run() {
         #[cfg(not(target_os = "macos"))]
         let _ = (app, event);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attachment_file_name;
+
+    #[test]
+    fn attachment_copies_get_a_safe_name_and_the_extension_of_their_real_type() {
+        assert_eq!(
+            attachment_file_name("TV 보증서.pdf", "application/pdf"),
+            "TV 보증서.pdf"
+        );
+        assert_eq!(
+            attachment_file_name("invoice.pdf.exe", "application/pdf"),
+            "invoice.pdf.pdf"
+        );
+        assert_eq!(
+            attachment_file_name("../../etc/passwd", "image/png"),
+            "_.png"
+        );
+        assert_eq!(attachment_file_name("...", "image/jpeg"), "첨부.jpg");
+    }
 }

@@ -30,6 +30,7 @@ import {
   Monitor,
   Moon,
   Package,
+  Paperclip,
   Plus,
   RefreshCw,
   Search,
@@ -42,6 +43,7 @@ import {
 } from "lucide-react";
 import EntityEditor, { Modal } from "./Editor";
 import TaskCalendar from "./Calendar";
+import SnoozeMenu from "./Snooze";
 import { useTheme, type ThemePreference } from "./theme";
 import {
   dateTime,
@@ -297,6 +299,31 @@ export default function App() {
       notifyError(e);
     } finally {
       setBusy(false);
+    }
+  }
+  async function snooze(task: Task, dueAt: string) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      setData(
+        await invoke<Snapshot>("snooze_task", {
+          id: task.id,
+          expectedDue: task.dueAt,
+          dueAt,
+        }),
+      );
+      setNotice({ text: `${dateTime(dueAt)}로 미뤘어요.` });
+    } catch (e) {
+      notifyError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function openAttachment(id: string) {
+    try {
+      await invoke("open_attachment", { id });
+    } catch (e) {
+      notifyError(e);
     }
   }
   async function reopen(record: TaskRecord) {
@@ -626,6 +653,9 @@ export default function App() {
                 </span>
               </div>
               {task.active && (
+                <SnoozeMenu task={task} disabled={busy} onSnooze={snooze} />
+              )}
+              {task.active && (
                 <button
                   className="icon-button skip-button"
                   disabled={busy}
@@ -663,10 +693,12 @@ export default function App() {
               className="item-open"
               onClick={() => openEditor({ kind: "item", value: item })}
             >
-              <div className={`item-image ${item.photo ? "" : "no-image"}`}>
-                {item.photo ? (
+              <div
+                className={`item-image ${item.photos.length ? "" : "no-image"}`}
+              >
+                {item.photos.length ? (
                   <img
-                    src={photoSrc(item.photo)}
+                    src={photoSrc(item.photos[0])}
                     alt={item.name}
                     loading="lazy"
                   />
@@ -698,6 +730,27 @@ export default function App() {
                     {item.purchaseStore}
                     {item.purchasePrice !== null &&
                       ` · ${item.purchasePrice.toLocaleString("ko-KR")}원`}
+                  </p>
+                )}
+                {item.warrantyUntil && (
+                  <p
+                    className={`warranty-info ${item.warrantyUntil < localDate(now) ? "overdue" : ""}`}
+                  >
+                    <ShieldCheck size={12} />
+                    보증 {expiryLabel(item.warrantyUntil)}
+                  </p>
+                )}
+                {(item.photos.length > 1 || item.attachments.length > 0) && (
+                  <p className="item-files">
+                    {item.photos.length > 1 && (
+                      <span>사진 {item.photos.length}장</span>
+                    )}
+                    {item.attachments.length > 0 && (
+                      <span>
+                        <Paperclip size={12} />
+                        첨부 {item.attachments.length}개
+                      </span>
+                    )}
                   </p>
                 )}
                 {item.notes && <p className="item-note">{item.notes}</p>}
@@ -948,6 +1001,7 @@ export default function App() {
                       i.notes,
                       i.purchaseStore,
                       spacePath(data.spaces, i.spaceId),
+                      ...i.attachments.map((a) => a.name),
                     ),
                   ),
                 )}
@@ -1096,8 +1150,8 @@ export default function App() {
                               }
                             >
                               <span className="expiry-mini">
-                                {i.photo ? (
-                                  <img src={photoSrc(i.photo)} alt="" />
+                                {i.photos.length ? (
+                                  <img src={photoSrc(i.photos[0])} alt="" />
                                 ) : (
                                   <Package size={20} />
                                 )}
@@ -1152,6 +1206,7 @@ export default function App() {
               onAdd={(dueAt) => openEditor({ kind: "task", dueAt })}
               onEdit={(task) => openEditor({ kind: "task", value: task })}
               onFinish={finish}
+              onSnooze={snooze}
               onReopen={reopen}
             />
           ) : page === "spaces" ? (
@@ -1724,6 +1779,7 @@ export default function App() {
           busy={busy}
           onClose={() => setEditor(null)}
           onSave={save}
+          onOpenAttachment={openAttachment}
           onDelete={(kind, id) => {
             setDeletionError("");
             setDeletion({ kind, id });

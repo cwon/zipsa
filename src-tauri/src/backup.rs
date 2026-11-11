@@ -169,6 +169,7 @@ mod tests {
         }
     }
 
+    /// `photo` is the single-photo field of backups from v0.2.0 and earlier.
     fn cup(photo: Option<&str>) -> Item {
         Item {
             id: "cup".into(),
@@ -177,18 +178,30 @@ mod tests {
             quantity: 1.0,
             unit: "개".into(),
             notes: "".into(),
+            photos: vec![],
             photo: photo.map(Into::into),
+            attachments: vec![],
             expires_on: None,
             purchased_on: None,
             purchase_store: "".into(),
             purchase_price: None,
+            warranty_until: None,
         }
     }
 
     fn filled() -> Store {
         let mut db = Store::from_connection(Connection::open_in_memory().unwrap()).unwrap();
         db.save_space(home()).unwrap();
-        db.save_item(cup(Some(JPEG))).unwrap();
+        let mut item = cup(None);
+        item.photos = vec![JPEG.into()];
+        item.attachments = vec![Attachment {
+            id: "".into(),
+            name: "영수증.pdf".into(),
+            mime: "".into(),
+            size: 0,
+            data: Some("data:application/pdf;base64,JVBERi0xLjQK".into()),
+        }];
+        db.save_item(item).unwrap();
         db.set_settings(Settings {
             notifications: true,
         })
@@ -219,10 +232,14 @@ mod tests {
         let data = target.restore(&source.store).unwrap();
         assert_eq!(data.spaces[0].name, "우리 집");
         assert!(data.settings.notifications);
-        let photo = target
-            .photo(data.items[0].photo.as_deref().unwrap())
-            .unwrap();
+        let photo = target.file(&data.items[0].photos[0]).unwrap();
         assert_eq!(photo.unwrap().data, [0xFF, 0xD8, 0xFF, 0xD9]);
+        let receipt = &data.items[0].attachments[0];
+        assert_eq!(receipt.name, "영수증.pdf");
+        assert_eq!(
+            target.file(&receipt.id).unwrap().unwrap().data,
+            b"%PDF-1.4\n"
+        );
         // The chosen file itself is never changed by opening it.
         drop(source);
         let check = Connection::open(&path).unwrap();
@@ -250,9 +267,9 @@ mod tests {
         let source = open(&path).unwrap();
         let mut target = Store::from_connection(Connection::open_in_memory().unwrap()).unwrap();
         let data = target.restore(&source.store).unwrap();
-        let id = data.items[0].photo.as_deref().unwrap();
+        let id = &data.items[0].photos[0];
         assert!(!id.starts_with("data:"));
-        assert!(target.photo(id).unwrap().is_some());
+        assert!(target.file(id).unwrap().is_some());
     }
 
     #[test]

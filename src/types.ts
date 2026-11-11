@@ -14,13 +14,30 @@ export interface Item {
   quantity: number;
   unit: string;
   notes: string;
-  /** 저장된 사진의 식별자. 새로 고른 사진은 저장할 때까지 data URL로 둔다. */
-  photo: string | null;
+  /**
+   * 저장된 사진의 식별자 목록. 첫 번째가 목록에 보이는 대표 사진이다.
+   * 새로 고른 사진은 저장할 때까지 data URL로 둔다.
+   */
+  photos: string[];
+  attachments: Attachment[];
   expiresOn: string | null;
   purchasedOn: string | null;
   purchaseStore: string;
   purchasePrice: number | null;
+  warrantyUntil: string | null;
 }
+/** 영수증·보증서·설명서처럼 아이템에 함께 보관하는 파일. */
+export interface Attachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  /** 새로 고른 파일만 저장할 때까지 data URL로 가진다. */
+  data?: string;
+}
+export const MAX_PHOTOS = 10;
+export const MAX_ATTACHMENTS = 10;
+export const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 export interface Task {
   id: string;
   spaceId: string | null;
@@ -118,6 +135,39 @@ export function reminderTime(
   if (!minutes) return null;
   const at = Date.parse(dueAt) - minutes * 60_000;
   return Number.isFinite(at) ? new Date(at).toISOString() : null;
+}
+
+export function fileSize(bytes: number) {
+  return bytes < 1024 * 1024
+    ? `${Math.max(1, Math.round(bytes / 1024)).toLocaleString("ko-KR")}KB`
+    : `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+export const snoozeOptions = [
+  { label: "1시간", hours: 1 },
+  { label: "하루", days: 1 },
+  { label: "3일", days: 3 },
+  { label: "일주일", days: 7 },
+] as const;
+/**
+ * 미룬 뒤의 예정 시각. 날짜 단위는 원래 예정 시각의 시·분을 유지한다.
+ * 이미 지난 일정은 오늘을 기준으로, 아직 남은 일정은 예정일을 기준으로 미룬다.
+ */
+export function snoozedTime(
+  dueAt: string,
+  option: (typeof snoozeOptions)[number],
+  now = new Date(),
+) {
+  const due = new Date(dueAt);
+  if ("hours" in option)
+    return new Date(
+      Math.max(due.getTime(), now.getTime()) + option.hours * 3_600_000,
+    ).toISOString();
+  const next = new Date(due);
+  if (due < now)
+    next.setFullYear(now.getFullYear(), now.getMonth(), now.getDate());
+  next.setDate(next.getDate() + option.days);
+  return next.toISOString();
 }
 
 /** 저장된 사진은 앱 전용 주소로 불러오고, 새로 고른 사진은 그대로 보여 준다. */

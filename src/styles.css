@@ -2271,3 +2271,160 @@ fieldset > p.field-hint {
     transition: none !important;
   }
 }
+
+/* ---------- Snooze ---------- */
+
+.snooze {
+  position: relative;
+  display: inline-flex;
+}
+.snooze-button {
+  opacity: 0.5;
+}
+.task-row:hover .snooze-button,
+.snooze-button:focus-visible,
+.snooze.open .snooze-button {
+  opacity: 1;
+}
+.dashboard-columns .snooze {
+  display: none;
+}
+.snooze-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 220px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+}
+/* 달력의 일정 상세는 창 아래쪽에 있어 목록을 위로 연다. */
+.calendar-detail-actions .snooze-menu {
+  top: auto;
+  right: auto;
+  left: 0;
+  bottom: calc(100% + 4px);
+}
+.snooze-menu button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  width: 100%;
+  padding: 9px 10px;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+}
+.snooze-menu button:hover,
+.snooze-menu button:focus-visible {
+  background: var(--surface-hover);
+}
+.snooze-menu button span {
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Item photos and attachments ---------- */
+
+.photo-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: -8px 0 18px;
+}
+.photo-strip > button:not(.text-button) {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  opacity: 0.6;
+}
+.photo-strip > button.selected {
+  border-color: var(--rule);
+  box-shadow: inset 0 0 0 1px var(--rule);
+  opacity: 1;
+}
+.photo-strip > button:hover {
+  opacity: 1;
+}
+.photo-strip img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.photo-strip > button > span {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  padding: 1px 4px;
+  background: var(--ink);
+  color: var(--ink-fg);
+  font-size: 10px;
+  font-weight: 600;
+}
+.photo-strip .text-button {
+  margin-left: 6px;
+}
+.attachments {
+  margin-bottom: 18px;
+}
+.attachments-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.attachments ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.attachments li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-2);
+  font-size: 13px;
+}
+.attachments li > svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+.attachment-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.attachments li small {
+  flex-shrink: 0;
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.item-info p.warranty-info,
+.item-info p.item-files {
+  margin-top: 4px;
+}
+.item-info p.item-files {
+  gap: 10px;
+}
+.item-info p.item-files span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}

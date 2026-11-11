@@ -1,8 +1,20 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { ImagePlus, Info, Maximize2, Trash2, X } from "lucide-react";
-import type { Editor, Item, Snapshot, Space, Task } from "./types";
 import {
+  ExternalLink,
+  FileText,
+  ImagePlus,
+  Info,
+  Maximize2,
+  Trash2,
+  X,
+} from "lucide-react";
+import type { Attachment, Editor, Item, Snapshot, Space, Task } from "./types";
+import {
+  ATTACHMENT_MAX_BYTES,
+  MAX_ATTACHMENTS,
+  MAX_PHOTOS,
   dateTime,
+  fileSize,
   localInput,
   photoSrc,
   reminderOptions,
@@ -86,6 +98,40 @@ async function readPhoto(file: File): Promise<string> {
   }
 }
 
+const attachmentTypes: Record<string, string> = {
+  pdf: "application/pdf",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+};
+
+/** 첨부 파일은 원본 그대로 보관한다. 실제 형식은 저장할 때 다시 확인한다. */
+async function readAttachment(file: File): Promise<Attachment> {
+  // 일부 환경은 파일 형식을 비워 두므로 확장자로 보완한다.
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  const mime = Object.values(attachmentTypes).includes(file.type)
+    ? file.type
+    : attachmentTypes[extension];
+  if (!mime)
+    throw new Error(`${file.name}: PDF·JPEG·PNG·WebP 파일을 선택해 주세요.`);
+  if (file.size > ATTACHMENT_MAX_BYTES)
+    throw new Error(`${file.name}: 첨부 파일은 10MB 이하로 선택해 주세요.`);
+  const url = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("파일을 읽지 못했습니다."));
+    reader.readAsDataURL(file);
+  });
+  return {
+    id: "",
+    name: file.name.slice(0, 200),
+    mime,
+    size: file.size,
+    data: `data:${mime};base64,${url.slice(url.indexOf(",") + 1)}`,
+  };
+}
+
 export default function EntityEditor({
   editor,
   data,
@@ -93,6 +139,7 @@ export default function EntityEditor({
   onClose,
   onSave,
   onDelete,
+  onOpenAttachment,
 }: {
   editor: Editor;
   data: Snapshot;
@@ -100,12 +147,19 @@ export default function EntityEditor({
   onClose: () => void;
   onSave: (kind: Editor["kind"], value: Space | Item | Task) => Promise<void>;
   onDelete: (kind: Editor["kind"], id: string) => void;
+  onOpenAttachment: (id: string) => void;
 }) {
   const [error, setError] = useState("");
-  const [photo, setPhoto] = useState<string | null>(
-    editor.kind === "item" ? (editor.value?.photo ?? null) : null,
+  const [photos, setPhotos] = useState<string[]>(
+    editor.kind === "item" ? (editor.value?.photos ?? []) : [],
+  );
+  const [photoIndex, setPhotoIndex] = useState(0);
+  const photo = photos[Math.min(photoIndex, photos.length - 1)] ?? null;
+  const [attachments, setAttachments] = useState<Attachment[]>(
+    editor.kind === "item" ? (editor.value?.attachments ?? []) : [],
   );
   const [photoBusy, setPhotoBusy] = useState(false);
+  const [fileBusy, setFileBusy] = useState(false);
   const [viewingPhoto, setViewingPhoto] = useState(false);
   const [mode, setMode] = useState(
     editor.kind === "task" ? (editor.value?.mode ?? "once") : "once",
@@ -175,7 +229,9 @@ export default function EntityEditor({
           quantity: Number(str("quantity")),
           unit: str("unit"),
           notes: str("notes"),
-          photo,
+          photos,
+          attachments,
+          warrantyUntil: str("warrantyUntil") || null,
           expiresOn: str("expiresOn") || null,
           purchasedOn: str("purchasedOn") || null,
           purchaseStore: str("purchaseStore"),
@@ -329,7 +385,11 @@ export default function EntityEditor({
                       type="button"
                       className="icon-button photo-remove"
                       aria-label="사진 삭제"
-                      onClick={() => setPhoto(null)}
+                      onClick={() => {
+                        const index = photos.indexOf(photo);
+                        setPhotos(photos.filter((_, i) => i !== index));
+                        setPhotoIndex(Math.max(0, index - 1));
+                      }}
                     >
                       <X size={16} />
                     </button>
@@ -337,32 +397,80 @@ export default function EntityEditor({
                 ) : (
                   <ImagePlus size={28} />
                 )}
-                <label className="photo-label">
-                  {photoBusy
-                    ? "사진 처리 중…"
-                    : photo
-                      ? "사진 바꾸기"
-                      : "사진 추가"}
-                  <input
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    disabled={photoBusy}
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      setPhotoBusy(true);
-                      setError("");
-                      try {
-                        setPhoto(await readPhoto(file));
-                      } catch (e) {
-                        setError(String(e));
-                      } finally {
-                        setPhotoBusy(false);
-                      }
-                    }}
-                  />
-                </label>
+                {photos.length < MAX_PHOTOS && (
+                  <label className="photo-label">
+                    {photoBusy ? "사진 처리 중…" : "사진 추가"}
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      multiple
+                      disabled={photoBusy}
+                      onChange={async (e) => {
+                        const files = [...(e.target.files ?? [])];
+                        e.target.value = "";
+                        if (!files.length) return;
+                        setPhotoBusy(true);
+                        setError("");
+                        const room = MAX_PHOTOS - photos.length;
+                        const added: string[] = [];
+                        try {
+                          for (const file of files.slice(0, room))
+                            added.push(await readPhoto(file));
+                          if (files.length > room)
+                            setError(
+                              `사진은 ${MAX_PHOTOS}장까지 넣을 수 있어요. 처음 ${room}장만 추가했어요.`,
+                            );
+                        } catch (e) {
+                          setError(String(e));
+                        } finally {
+                          if (added.length) {
+                            setPhotos([...photos, ...added]);
+                            setPhotoIndex(photos.length);
+                          }
+                          setPhotoBusy(false);
+                        }
+                      }}
+                    />
+                  </label>
+                )}
               </div>
+              {photos.length > 1 && (
+                <div
+                  className="photo-strip"
+                  role="group"
+                  aria-label="아이템 사진 목록"
+                >
+                  {photos.map((source, index) => (
+                    <button
+                      // 같은 사진을 두 번 고를 수 있어 순서를 키로 쓴다.
+                      key={index}
+                      type="button"
+                      className={source === photo ? "selected" : ""}
+                      aria-pressed={source === photo}
+                      aria-label={`사진 ${index + 1}${index === 0 ? " (대표)" : ""}`}
+                      onClick={() => setPhotoIndex(index)}
+                    >
+                      <img src={photoSrc(source)} alt="" />
+                      {index === 0 && <span aria-hidden="true">대표</span>}
+                    </button>
+                  ))}
+                  {photos.indexOf(photo!) > 0 && (
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => {
+                        setPhotos([
+                          photo!,
+                          ...photos.filter((p) => p !== photo),
+                        ]);
+                        setPhotoIndex(0);
+                      }}
+                    >
+                      대표 사진으로
+                    </button>
+                  )}
+                </div>
+              )}
               {viewingPhoto && photo && (
                 <Modal
                   title={editor.value?.name || "아이템 사진"}
@@ -464,6 +572,104 @@ export default function EntityEditor({
                   />
                 </label>
               </div>
+              <div className="form-row">
+                <label>
+                  보증 만료일
+                  <input
+                    name="warrantyUntil"
+                    type="date"
+                    defaultValue={editor.value?.warrantyUntil ?? ""}
+                  />
+                </label>
+              </div>
+              <section className="attachments" aria-label="첨부 파일">
+                <div className="attachments-heading">
+                  <strong>
+                    첨부 파일
+                    {attachments.length > 0 &&
+                      ` ${attachments.length}/${MAX_ATTACHMENTS}`}
+                  </strong>
+                  {attachments.length < MAX_ATTACHMENTS && (
+                    <label className="photo-label">
+                      {fileBusy ? "파일 읽는 중…" : "파일 추가"}
+                      <input
+                        type="file"
+                        accept="application/pdf,image/jpeg,image/png,image/webp"
+                        multiple
+                        disabled={fileBusy}
+                        onChange={async (e) => {
+                          const files = [...(e.target.files ?? [])];
+                          e.target.value = "";
+                          if (!files.length) return;
+                          setFileBusy(true);
+                          setError("");
+                          const room = MAX_ATTACHMENTS - attachments.length;
+                          const added: Attachment[] = [];
+                          try {
+                            for (const file of files.slice(0, room))
+                              added.push(await readAttachment(file));
+                            if (files.length > room)
+                              setError(
+                                `첨부 파일은 ${MAX_ATTACHMENTS}개까지 넣을 수 있어요. 처음 ${room}개만 추가했어요.`,
+                              );
+                          } catch (e) {
+                            setError(String(e));
+                          } finally {
+                            if (added.length)
+                              setAttachments([...attachments, ...added]);
+                            setFileBusy(false);
+                          }
+                        }}
+                      />
+                    </label>
+                  )}
+                </div>
+                {attachments.length ? (
+                  <ul>
+                    {attachments.map((file, index) => (
+                      <li key={file.id || `new-${index}`}>
+                        <FileText size={16} />
+                        <span className="attachment-name" title={file.name}>
+                          {file.name}
+                        </span>
+                        <small>
+                          {fileSize(file.size)}
+                          {file.data && " · 저장하면 열 수 있어요"}
+                        </small>
+                        {!file.data && (
+                          <button
+                            type="button"
+                            className="icon-button"
+                            title="기본 앱으로 열기"
+                            aria-label={`${file.name} 열기`}
+                            onClick={() => onOpenAttachment(file.id)}
+                          >
+                            <ExternalLink size={15} />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="icon-button"
+                          title="첨부 파일 삭제"
+                          aria-label={`${file.name} 삭제`}
+                          onClick={() =>
+                            setAttachments(
+                              attachments.filter((_, i) => i !== index),
+                            )
+                          }
+                        >
+                          <X size={15} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="field-hint">
+                    영수증·보증서·설명서를 함께 보관해요. PDF·JPEG·PNG·WebP
+                    형식, 파일당 10MB까지 넣을 수 있어요.
+                  </p>
+                )}
+              </section>
             </>
           )}
           {editor.kind === "task" && (
@@ -663,7 +869,10 @@ export default function EntityEditor({
           >
             취소
           </button>
-          <button className="button primary" disabled={busy || photoBusy}>
+          <button
+            className="button primary"
+            disabled={busy || photoBusy || fileBusy}
+          >
             {busy ? "저장 중…" : "저장"}
           </button>
         </div>

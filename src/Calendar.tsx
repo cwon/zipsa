@@ -22,6 +22,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { Modal } from "./Editor";
+import SnoozeMenu from "./Snooze";
 import {
   dateTime,
   localDate,
@@ -76,6 +77,7 @@ export default function TaskCalendar({
   onAdd,
   onEdit,
   onFinish,
+  onSnooze,
   onReopen,
 }: {
   data: Snapshot;
@@ -84,6 +86,7 @@ export default function TaskCalendar({
   onAdd: (dueAt: string) => void;
   onEdit: (task: Task) => void;
   onFinish: (task: Task, outcome: "completed" | "skipped") => Promise<void>;
+  onSnooze: (task: Task, dueAt: string) => Promise<void>;
   onReopen: (record: TaskRecord) => Promise<void>;
 }) {
   const [month, setMonth] = useState(() => monthStart(now));
@@ -641,6 +644,12 @@ export default function TaskCalendar({
                           <SkipForward size={16} />
                           건너뛰기
                         </button>
+                        <SnoozeMenu
+                          task={task}
+                          labeled
+                          disabled={busy || loading}
+                          onSnooze={(task, dueAt) => void onSnooze(task, dueAt)}
+                        />
                       </>
                     )}
                     {record && task && latestRecord?.id === record.id && (

@@ -17,21 +17,45 @@ use crate::{
 
 type Result<T> = std::result::Result<T, String>;
 
-/// v2 moved item photos out of the item JSON into the `photos` table, so
-/// saving or listing data never reads or sends photo bytes.
-pub const SCHEMA_VERSION: u32 = 2;
+/// v2 moved item photos out of the item JSON into their own table, so saving
+/// or listing data never reads or sends photo bytes. v3 lets an item have
+/// several photos and attached documents, all stored in the `files` table.
+pub const SCHEMA_VERSION: u32 = 3;
 /// Marks SQLite files written by Zipsa ("ZIPS") so a restore can reject other databases.
 const APPLICATION_ID: i32 = 0x5A49_5053;
-const PHOTO_MAX_BYTES: usize = 3 * 1024 * 1024;
-const PHOTO_ERROR: &str = "사진은 3MB 이하의 JPEG·PNG·WebP 형식이어야 합니다.";
-const PHOTO_TYPES: [(&str, &str); 3] = [
-    ("image/jpeg", "data:image/jpeg;base64,"),
-    ("image/png", "data:image/png;base64,"),
-    ("image/webp", "data:image/webp;base64,"),
-];
+pub const MAX_PHOTOS: usize = 10;
+pub const MAX_ATTACHMENTS: usize = 10;
+
+/// What a stored file is used for, which decides the types and size it may have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Photo,
+    Attachment,
+}
+
+impl FileKind {
+    fn types(self) -> &'static [&'static str] {
+        match self {
+            Self::Photo => &["image/jpeg", "image/png", "image/webp"],
+            Self::Attachment => &["application/pdf", "image/jpeg", "image/png", "image/webp"],
+        }
+    }
+    fn max_bytes(self) -> usize {
+        match self {
+            Self::Photo => 3 * 1024 * 1024,
+            Self::Attachment => 10 * 1024 * 1024,
+        }
+    }
+    fn error(self) -> &'static str {
+        match self {
+            Self::Photo => "사진은 3MB 이하의 JPEG·PNG·WebP 형식이어야 합니다.",
+            Self::Attachment => "첨부 파일은 10MB 이하의 PDF·JPEG·PNG·WebP 형식이어야 합니다.",
+        }
+    }
+}
 const INVALID_BACKUP: &str =
     "집사 백업 파일을 읽지 못했습니다. 올바른 .zipsa 파일인지 확인해 주세요.";
-const MISSING_PHOTO: &str = "백업에서 일부 사진을 찾을 수 없습니다.";
+const MISSING_FILE: &str = "백업에서 일부 사진이나 첨부 파일을 찾을 수 없습니다.";
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS spaces (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES spaces(id) DEFERRABLE INITIALLY DEFERRED, data TEXT NOT NULL);
@@ -39,7 +63,8 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, space_id TEXT REFERENCES spaces(id), item_id TEXT REFERENCES items(id), data TEXT NOT NULL, CHECK ((space_id IS NULL) != (item_id IS NULL)));
     CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, data TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, item_id TEXT NOT NULL UNIQUE REFERENCES items(id) ON DELETE CASCADE, mime TEXT NOT NULL, data BLOB NOT NULL);
+    CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE, mime TEXT NOT NULL, data BLOB NOT NULL);
+    CREATE INDEX IF NOT EXISTS files_item ON files(item_id);
     CREATE INDEX IF NOT EXISTS spaces_parent ON spaces(parent_id);
     CREATE INDEX IF NOT EXISTS items_space ON items(space_id);
     CREATE INDEX IF NOT EXISTS tasks_space ON tasks(space_id);
@@ -49,40 +74,43 @@ pub struct Store {
     pub conn: Connection,
 }
 
+/// The bytes of a photo or attachment, kept in the `files` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Photo {
+pub struct StoredFile {
     pub mime: String,
     pub data: Vec<u8>,
 }
 
-impl Photo {
-    /// Decodes a photo picked in the editor (`data:image/...;base64,...`).
-    pub fn from_data_url(url: &str) -> Result<Self> {
-        let (mime, encoded) = PHOTO_TYPES
-            .iter()
-            .find_map(|(mime, prefix)| url.strip_prefix(prefix).map(|rest| (*mime, rest)))
-            .ok_or(PHOTO_ERROR)?;
-        if encoded.len() > PHOTO_MAX_BYTES.div_ceil(3) * 4 {
-            return Err(PHOTO_ERROR.into());
+impl StoredFile {
+    /// Decodes a file picked in the editor (`data:<type>;base64,...`).
+    pub fn from_data_url(url: &str, kind: FileKind) -> Result<Self> {
+        let (mime, encoded) = url
+            .strip_prefix("data:")
+            .and_then(|rest| rest.split_once(";base64,"))
+            .ok_or(kind.error())?;
+        if encoded.len() > kind.max_bytes().div_ceil(3) * 4 {
+            return Err(kind.error().into());
         }
-        let photo = Self {
+        let file = Self {
             mime: mime.into(),
-            data: STANDARD.decode(encoded).map_err(|_| PHOTO_ERROR)?,
+            data: STANDARD.decode(encoded).map_err(|_| kind.error())?,
         };
-        photo.check()?;
-        Ok(photo)
+        file.check(kind)?;
+        Ok(file)
     }
 
-    fn check(&self) -> Result<()> {
+    /// The type is confirmed from the content, not from what the sender claims.
+    fn check(&self, kind: FileKind) -> Result<()> {
         let d = &self.data;
         let signature = match self.mime.as_str() {
             "image/jpeg" => d.starts_with(&[0xFF, 0xD8, 0xFF]),
             "image/png" => d.starts_with(b"\x89PNG\r\n\x1a\n"),
             "image/webp" => d.len() >= 12 && d.starts_with(b"RIFF") && &d[8..12] == b"WEBP",
+            "application/pdf" => d.starts_with(b"%PDF-"),
             _ => false,
         };
-        if !signature || d.len() > PHOTO_MAX_BYTES {
-            return Err(PHOTO_ERROR.into());
+        if !signature || !kind.types().contains(&self.mime.as_str()) || d.len() > kind.max_bytes() {
+            return Err(kind.error().into());
         }
         Ok(())
     }
@@ -97,10 +125,10 @@ fn user_version(conn: &Connection) -> Result<u32> {
         .map_err(err)
 }
 
-fn insert_photo(conn: &Connection, id: &str, item_id: &str, photo: &Photo) -> Result<()> {
+fn insert_file(conn: &Connection, id: &str, item_id: &str, file: &StoredFile) -> Result<()> {
     conn.execute(
-        "INSERT INTO photos (id,item_id,mime,data) VALUES (?1,?2,?3,?4)",
-        params![id, item_id, photo.mime, photo.data],
+        "INSERT INTO files (id,item_id,mime,data) VALUES (?1,?2,?3,?4)",
+        params![id, item_id, file.mime, file.data],
     )
     .map(|_| ())
     .map_err(err)
@@ -117,8 +145,16 @@ fn touch(conn: &Connection) -> Result<()> {
     .map_err(err)
 }
 
-/// v1 stored each photo as a data URL inside the item JSON.
-fn move_inline_photos(conn: &Connection) -> Result<()> {
+/// Brings item photos from an older schema into `files` and `Item::photos`.
+/// v1 stored one photo as a data URL inside the item JSON. v2 stored one
+/// photo per item in the `photos` table and its id in the item JSON.
+fn upgrade_photos(conn: &Connection, version: u32) -> Result<()> {
+    if version == 2 {
+        conn.execute_batch(
+            "INSERT INTO files (id,item_id,mime,data) SELECT id,item_id,mime,data FROM photos; DROP TABLE photos;",
+        )
+        .map_err(err)?;
+    }
     let items: Vec<(String, String)> = {
         let mut stmt = conn.prepare("SELECT id, data FROM items").map_err(err)?;
         let rows = stmt
@@ -128,15 +164,17 @@ fn move_inline_photos(conn: &Connection) -> Result<()> {
     };
     for (id, data) in items {
         let mut item: Item = serde_json::from_str(&data).map_err(err)?;
-        let Some(url) = item.photo.take() else {
+        let Some(photo) = item.photo.take() else {
             continue;
         };
-        // A photo that would fail validation is dropped instead of blocking
-        // the upgrade. The pre-upgrade backup still contains it.
-        if let Ok(photo) = Photo::from_data_url(&url) {
+        if version == 2 {
+            item.photos = vec![photo];
+        } else if let Ok(file) = StoredFile::from_data_url(&photo, FileKind::Photo) {
+            // A photo that would fail validation is dropped instead of blocking
+            // the upgrade. The pre-upgrade backup still contains it.
             let photo_id = Uuid::new_v4().to_string();
-            insert_photo(conn, &photo_id, &id, &photo)?;
-            item.photo = Some(photo_id);
+            insert_file(conn, &photo_id, &id, &file)?;
+            item.photos = vec![photo_id];
         }
         conn.execute(
             "UPDATE items SET data=?2 WHERE id=?1",
@@ -222,7 +260,10 @@ pub fn validate(data: &Snapshot) -> Result<()> {
     unique_ids(data.records.iter().map(|s| &s.id))?;
     let spaces: HashMap<_, _> = data.spaces.iter().map(|s| (s.id.as_str(), s)).collect();
     let items: HashSet<_> = data.items.iter().map(|s| s.id.as_str()).collect();
-    let mut photos = HashSet::new();
+    let mut files = HashSet::new();
+    let mut file_id = |id: &str| {
+        !id.is_empty() && id.len() <= 100 && !id.starts_with("data:") && files.insert(id.to_owned())
+    };
     for s in &data.spaces {
         text(&s.name, "공간 이름", true, 100)?;
         text(&s.notes, "메모", false, 10_000)?;
@@ -255,14 +296,28 @@ pub fn validate(data: &Snapshot) -> Result<()> {
         }
         date(&i.expires_on)?;
         date(&i.purchased_on)?;
-        // Stored items refer to a row in `photos`; the bytes are checked when written.
-        if let Some(photo) = &i.photo {
-            if photo.is_empty()
-                || photo.len() > 100
-                || photo.starts_with("data:")
-                || !photos.insert(photo.as_str())
+        date(&i.warranty_until)?;
+        // Stored items refer to rows in `files`; the bytes are checked when written.
+        if i.photo.is_some()
+            || i.photos.len() > MAX_PHOTOS
+            || !i.photos.iter().all(|id| file_id(id))
+        {
+            return Err(format!(
+                "아이템 사진 정보가 올바르지 않습니다. 사진은 {MAX_PHOTOS}장까지 넣을 수 있어요."
+            ));
+        }
+        if i.attachments.len() > MAX_ATTACHMENTS {
+            return Err(format!(
+                "첨부 파일은 아이템마다 {MAX_ATTACHMENTS}개까지 넣을 수 있어요."
+            ));
+        }
+        for a in &i.attachments {
+            text(&a.name, "첨부 파일 이름", true, 200)?;
+            if a.data.is_some()
+                || !FileKind::Attachment.types().contains(&a.mime.as_str())
+                || !file_id(&a.id)
             {
-                return Err("아이템 사진 정보가 올바르지 않습니다.".into());
+                return Err("첨부 파일 정보가 올바르지 않습니다.".into());
             }
         }
     }
@@ -352,8 +407,8 @@ impl Store {
         if version < SCHEMA_VERSION {
             let tx = conn.unchecked_transaction().map_err(err)?;
             tx.execute_batch(SCHEMA).map_err(err)?;
-            if version == 1 {
-                move_inline_photos(&tx)?;
+            if version > 0 {
+                upgrade_photos(&tx, version)?;
             }
             tx.execute_batch(&format!(
                 "PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {SCHEMA_VERSION};"
@@ -400,12 +455,15 @@ impl Store {
         for item in &mut data.items {
             if let Some(url) = item.photo.take() {
                 let id = Uuid::new_v4().to_string();
-                photos.insert(id.clone(), Photo::from_data_url(&url)?);
-                item.photo = Some(id);
+                photos.insert(
+                    id.clone(),
+                    StoredFile::from_data_url(&url, FileKind::Photo)?,
+                );
+                item.photos = vec![id];
             }
         }
         let mut store = Self::from_connection(Connection::open_in_memory().map_err(err)?)?;
-        store.replace_all(&data, |id| photos.remove(id).ok_or(MISSING_PHOTO.into()))?;
+        store.replace_all(&data, |id| photos.remove(id).ok_or(MISSING_FILE.into()))?;
         Ok(store)
     }
 
@@ -413,10 +471,10 @@ impl Store {
         backup_connection(&self.conn, dest)
     }
 
-    pub fn photo(&self, id: &str) -> Result<Option<Photo>> {
+    pub fn file(&self, id: &str) -> Result<Option<StoredFile>> {
         self.conn
-            .query_row("SELECT mime, data FROM photos WHERE id = ?1", [id], |r| {
-                Ok(Photo {
+            .query_row("SELECT mime, data FROM files WHERE id = ?1", [id], |r| {
+                Ok(StoredFile {
                     mime: r.get(0)?,
                     data: r.get(1)?,
                 })
@@ -560,36 +618,63 @@ impl Store {
             item.id = Uuid::new_v4().to_string();
         }
         item.name = item.name.trim().into();
+        item.photo = None;
         let mut data = self.snapshot()?;
-        let previous = data
-            .items
+        let previous = data.items.iter().find(|i| i.id == item.id);
+        let old_photos: HashSet<&str> = previous
             .iter()
-            .find(|i| i.id == item.id)
-            .and_then(|i| i.photo.clone());
-        // The editor sends a newly picked photo as a data URL and an unchanged
+            .flat_map(|i| i.photos.iter().map(String::as_str))
+            .collect();
+        // The editor sends a newly picked file as a data URL and an unchanged
         // one as its stored id.
-        let new_photo = match item.photo.as_deref() {
-            Some(url) if url.starts_with("data:") => {
-                let photo = Photo::from_data_url(url)?;
-                item.photo = Some(Uuid::new_v4().to_string());
-                Some(photo)
-            }
-            Some(id) if previous.as_deref() != Some(id) => {
+        let mut added = vec![];
+        for photo in &mut item.photos {
+            if photo.starts_with("data:") {
+                let file = StoredFile::from_data_url(photo, FileKind::Photo)?;
+                *photo = Uuid::new_v4().to_string();
+                added.push((photo.clone(), file));
+            } else if !old_photos.contains(photo.as_str()) {
                 return Err("사진을 찾을 수 없습니다. 사진을 다시 선택해 주세요.".into());
             }
-            _ => None,
+        }
+        for attachment in &mut item.attachments {
+            attachment.name = attachment.name.trim().into();
+            if let Some(url) = attachment.data.take() {
+                let file = StoredFile::from_data_url(&url, FileKind::Attachment)?;
+                attachment.id = Uuid::new_v4().to_string();
+                attachment.mime = file.mime.clone();
+                attachment.size = file.data.len() as u64;
+                added.push((attachment.id.clone(), file));
+            } else {
+                let stored = previous
+                    .and_then(|i| i.attachments.iter().find(|a| a.id == attachment.id))
+                    .ok_or("첨부 파일을 찾을 수 없습니다. 파일을 다시 선택해 주세요.")?;
+                attachment.mime = stored.mime.clone();
+                attachment.size = stored.size;
+            }
+        }
+        let file_ids = |i: &Item| -> HashSet<String> {
+            i.photos
+                .iter()
+                .chain(i.attachments.iter().map(|a| &a.id))
+                .cloned()
+                .collect()
         };
+        let kept = file_ids(&item);
+        let removed: Vec<String> = previous
+            .map(|i| file_ids(i).difference(&kept).cloned().collect())
+            .unwrap_or_default();
         data.items.retain(|i| i.id != item.id);
         data.items.push(item.clone());
         validate(&data)?;
         let tx = self.conn.transaction().map_err(err)?;
         tx.execute("INSERT INTO items (id,space_id,data) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET space_id=excluded.space_id,data=excluded.data", params![item.id, item.space_id, json(&item)?]).map_err(err)?;
-        if previous != item.photo {
-            tx.execute("DELETE FROM photos WHERE item_id = ?1", [&item.id])
+        for id in &removed {
+            tx.execute("DELETE FROM files WHERE id = ?1", [id])
                 .map_err(err)?;
         }
-        if let (Some(photo), Some(id)) = (new_photo, &item.photo) {
-            insert_photo(&tx, id, &item.id, &photo)?;
+        for (id, file) in &added {
+            insert_file(&tx, id, &item.id, file)?;
         }
         touch(&tx)?;
         tx.commit().map_err(err)?;
@@ -649,7 +734,7 @@ impl Store {
             "task" => "tasks",
             _ => return Err("삭제할 대상을 찾을 수 없습니다.".into()),
         };
-        // Deleting an item also deletes its photo (ON DELETE CASCADE).
+        // Deleting an item also deletes its photos and attachments (ON DELETE CASCADE).
         self.conn
             .execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])
             .map_err(|e| e.to_string())?;
@@ -711,6 +796,38 @@ impl Store {
         .map_err(|e| e.to_string())?;
         touch(&tx)?;
         tx.commit().map_err(|e| e.to_string())?;
+        self.snapshot()
+    }
+
+    /// Moves the current occurrence to a later time. The recurrence rule and
+    /// its anchor stay as they are, so later occurrences keep their dates.
+    pub fn snooze(&mut self, id: &str, expected_due: &str, due_at: &str) -> Result<Snapshot> {
+        let mut data = self.snapshot()?;
+        let task = data
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or("할 일을 찾을 수 없습니다.")?;
+        let current = parse_time(&task.due_at)?;
+        if !task.active || current != parse_time(expected_due)? {
+            return Err("이미 처리된 일정입니다. 목록을 새로 확인해 주세요.".into());
+        }
+        let next = parse_time(due_at)?;
+        if next <= current {
+            return Err("지금 예정일보다 늦은 시각으로 미뤄 주세요.".into());
+        }
+        task.due_at = next.to_rfc3339();
+        task.notified_due_at = None;
+        task.notified_reminder_at = None;
+        let task = task.clone();
+        validate(&data)?;
+        self.conn
+            .execute(
+                "UPDATE tasks SET data=?2 WHERE id=?1",
+                params![task.id, json(&task)?],
+            )
+            .map_err(err)?;
+        touch(&self.conn)?;
         self.snapshot()
     }
 
@@ -799,24 +916,20 @@ impl Store {
     /// Replaces all data with the contents of an opened backup.
     pub fn restore(&mut self, source: &Store) -> Result<Snapshot> {
         let data = source.snapshot()?;
-        self.replace_all(&data, |id| {
-            let photo = source.photo(id)?.ok_or(MISSING_PHOTO)?;
-            photo.check()?;
-            Ok(photo)
-        })?;
+        self.replace_all(&data, |id| Ok(source.file(id)?.ok_or(MISSING_FILE)?))?;
         self.snapshot()
     }
 
-    /// Replaces everything in one transaction. `photo` returns the bytes for
-    /// each photo id the snapshot refers to.
+    /// Replaces everything in one transaction. `file` returns the bytes for
+    /// each photo and attachment id the snapshot refers to.
     fn replace_all(
         &mut self,
         data: &Snapshot,
-        mut photo: impl FnMut(&str) -> Result<Photo>,
+        mut file: impl FnMut(&str) -> Result<StoredFile>,
     ) -> Result<()> {
         validate(data)?;
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute_batch("PRAGMA defer_foreign_keys=ON; DELETE FROM photos; DELETE FROM tasks; DELETE FROM items; DELETE FROM spaces; DELETE FROM records;").map_err(|e| e.to_string())?;
+        tx.execute_batch("PRAGMA defer_foreign_keys=ON; DELETE FROM files; DELETE FROM tasks; DELETE FROM items; DELETE FROM spaces; DELETE FROM records;").map_err(|e| e.to_string())?;
         for s in &data.spaces {
             tx.execute(
                 "INSERT INTO spaces (id,parent_id,data) VALUES (?1,?2,?3)",
@@ -830,8 +943,18 @@ impl Store {
                 params![i.id, i.space_id, json(i)?],
             )
             .map_err(|e| e.to_string())?;
-            if let Some(id) = &i.photo {
-                insert_photo(&tx, id, &i.id, &photo(id)?)?;
+            for id in &i.photos {
+                let photo = file(id)?;
+                photo.check(FileKind::Photo)?;
+                insert_file(&tx, id, &i.id, &photo)?;
+            }
+            for a in &i.attachments {
+                let stored = file(&a.id)?;
+                stored.check(FileKind::Attachment)?;
+                if stored.mime != a.mime {
+                    return Err("첨부 파일 정보가 올바르지 않습니다.".into());
+                }
+                insert_file(&tx, &a.id, &i.id, &stored)?;
             }
         }
         for t in &data.tasks {
@@ -904,6 +1027,8 @@ mod tests {
     const JPEG: &str = "data:image/jpeg;base64,/9j/2Q==";
     const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jp1sAAAAASUVORK5CYII=";
 
+    const PDF: &str = "data:application/pdf;base64,JVBERi0xLjQK";
+
     fn item(id: &str, photo: Option<&str>) -> Item {
         Item {
             id: id.into(),
@@ -912,17 +1037,38 @@ mod tests {
             quantity: 1.0,
             unit: "개".into(),
             notes: "".into(),
-            photo: photo.map(Into::into),
+            photos: photo.into_iter().map(Into::into).collect(),
+            photo: None,
+            attachments: vec![],
             expires_on: None,
             purchased_on: None,
             purchase_store: "".into(),
             purchase_price: None,
+            warranty_until: None,
         }
     }
 
-    fn photo_rows(db: &Store) -> i64 {
+    /// An item as schema v1 and v2 stored it, with a single `photo` field.
+    fn old_item(id: &str, photo: Option<&str>) -> Item {
+        Item {
+            photo: photo.map(Into::into),
+            ..item(id, None)
+        }
+    }
+
+    fn attachment(name: &str, data: &str) -> Attachment {
+        Attachment {
+            id: "".into(),
+            name: name.into(),
+            mime: "".into(),
+            size: 0,
+            data: Some(data.into()),
+        }
+    }
+
+    fn file_rows(db: &Store) -> i64 {
         db.conn
-            .query_row("SELECT count(*) FROM photos", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
             .unwrap()
     }
 
@@ -953,7 +1099,7 @@ mod tests {
         ));
         assert_eq!(
             db.restore(&missing_photo).unwrap_err(),
-            MISSING_PHOTO.to_string()
+            MISSING_FILE.to_string()
         );
         let data = db.snapshot().unwrap();
         assert_eq!(data.spaces.len(), 1);
@@ -977,11 +1123,11 @@ mod tests {
         let mut db = store();
         db.save_space(space("home", None)).unwrap();
         let data = db.save_item(item("cup", Some(JPEG))).unwrap();
-        let first = data.items[0].photo.clone().unwrap();
+        let first = data.items[0].photos[0].clone();
         assert!(!first.starts_with("data:"), "snapshots carry only the id");
         assert_eq!(
-            db.photo(&first).unwrap().unwrap(),
-            Photo {
+            db.file(&first).unwrap().unwrap(),
+            StoredFile {
                 mime: "image/jpeg".into(),
                 data: vec![0xFF, 0xD8, 0xFF, 0xD9]
             }
@@ -990,28 +1136,176 @@ mod tests {
         let mut edited = data.items[0].clone();
         edited.notes = "메모".into();
         let data = db.save_item(edited.clone()).unwrap();
-        assert_eq!(data.items[0].photo.as_deref(), Some(first.as_str()));
+        assert_eq!(data.items[0].photos, std::slice::from_ref(&first));
         // A new photo gets a new id and the old row is removed.
-        edited.photo = Some(PNG.into());
+        edited.photos = vec![PNG.into()];
         let data = db.save_item(edited.clone()).unwrap();
-        let second = data.items[0].photo.clone().unwrap();
+        let second = data.items[0].photos[0].clone();
         assert_ne!(second, first);
-        assert!(db.photo(&first).unwrap().is_none());
-        assert_eq!(db.photo(&second).unwrap().unwrap().mime, "image/png");
-        assert_eq!(photo_rows(&db), 1);
+        assert!(db.file(&first).unwrap().is_none());
+        assert_eq!(db.file(&second).unwrap().unwrap().mime, "image/png");
+        assert_eq!(file_rows(&db), 1);
         // Another item cannot point at this photo.
         assert!(db.save_item(item("plate", Some(&second))).is_err());
         // Bytes that do not match the declared type are rejected.
         assert!(db
             .save_item(item("bowl", Some("data:image/png;base64,/9j/2Q==")))
             .is_err());
-        edited.photo = None;
+        // A document is not a photo.
+        assert!(db.save_item(item("bowl", Some(PDF))).is_err());
+        edited.photos = vec![];
         db.save_item(edited.clone()).unwrap();
-        assert_eq!(photo_rows(&db), 0);
-        edited.photo = Some(JPEG.into());
+        assert_eq!(file_rows(&db), 0);
+        edited.photos = vec![JPEG.into()];
         db.save_item(edited).unwrap();
         db.delete("item", "cup").unwrap();
-        assert_eq!(photo_rows(&db), 0);
+        assert_eq!(file_rows(&db), 0);
+    }
+
+    #[test]
+    fn items_keep_several_photos_in_order_and_attachments_with_their_names() {
+        let mut db = store();
+        db.save_space(space("home", None)).unwrap();
+        let mut tv = item("tv", None);
+        tv.photos = vec![JPEG.into(), PNG.into()];
+        tv.attachments = vec![
+            attachment(" 보증서.pdf ", PDF),
+            attachment("영수증.jpg", JPEG),
+        ];
+        tv.warranty_until = Some("2028-11-11".into());
+        let saved = db.save_item(tv).unwrap().items.remove(0);
+        assert_eq!(saved.warranty_until.as_deref(), Some("2028-11-11"));
+        assert_eq!(file_rows(&db), 4);
+        assert_eq!(
+            db.file(&saved.photos[1]).unwrap().unwrap().mime,
+            "image/png"
+        );
+        let warranty = &saved.attachments[0];
+        assert_eq!(
+            (
+                warranty.name.as_str(),
+                warranty.mime.as_str(),
+                warranty.size
+            ),
+            ("보증서.pdf", "application/pdf", 9)
+        );
+        assert!(warranty.data.is_none(), "snapshots carry no file bytes");
+        assert_eq!(db.file(&warranty.id).unwrap().unwrap().data, b"%PDF-1.4\n");
+
+        // Reordering makes another photo the cover without rewriting files.
+        // Stored details of a kept attachment cannot be changed by the editor.
+        let mut edited = saved.clone();
+        edited.photos.reverse();
+        edited.photos.push(JPEG.into());
+        edited.attachments.remove(1);
+        edited.attachments[0].mime = "image/png".into();
+        edited.attachments[0].size = 1;
+        let next = db.save_item(edited).unwrap().items.remove(0);
+        assert_eq!(
+            next.photos[..2],
+            [saved.photos[1].clone(), saved.photos[0].clone()]
+        );
+        assert_eq!(next.attachments, std::slice::from_ref(warranty));
+        assert!(db.file(&saved.attachments[1].id).unwrap().is_none());
+        assert_eq!(file_rows(&db), 4);
+
+        // Limits, unknown ids and unsupported types leave the item unchanged.
+        let mut invalid = next.clone();
+        invalid.photos = vec![JPEG.into(); MAX_PHOTOS + 1];
+        assert!(db.save_item(invalid).is_err());
+        let mut invalid = next.clone();
+        invalid.attachments[0].id = "ghost".into();
+        assert!(db.save_item(invalid).is_err());
+        let mut invalid = next.clone();
+        invalid.attachments = vec![attachment(
+            "run.exe",
+            "data:application/x-msdownload;base64,TVo=",
+        )];
+        assert!(db.save_item(invalid).is_err());
+        let mut invalid = next.clone();
+        invalid.attachments = vec![attachment(
+            "fake.pdf",
+            "data:application/pdf;base64,/9j/2Q==",
+        )];
+        assert!(db.save_item(invalid).is_err());
+        let mut invalid = next.clone();
+        invalid.warranty_until = Some("내년".into());
+        assert!(db.save_item(invalid).is_err());
+        assert_eq!(db.snapshot().unwrap().items[0], next);
+        assert_eq!(file_rows(&db), 4);
+
+        // Everything survives a restore into another database.
+        let mut other = store();
+        let restored = other.restore(&db).unwrap();
+        assert_eq!(restored.items[0], next);
+        assert_eq!(file_rows(&other), 4);
+        db.delete("item", "tv").unwrap();
+        assert_eq!(file_rows(&db), 0);
+    }
+
+    #[test]
+    fn upgrading_v2_keeps_each_photo_as_the_first_of_its_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zipsa.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("
+            CREATE TABLE spaces (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES spaces(id) DEFERRABLE INITIALLY DEFERRED, data TEXT NOT NULL);
+            CREATE TABLE items (id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id), data TEXT NOT NULL);
+            CREATE TABLE tasks (id TEXT PRIMARY KEY, space_id TEXT REFERENCES spaces(id), item_id TEXT REFERENCES items(id), data TEXT NOT NULL, CHECK ((space_id IS NULL) != (item_id IS NULL)));
+            CREATE TABLE records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+            CREATE TABLE photos (id TEXT PRIMARY KEY, item_id TEXT NOT NULL UNIQUE REFERENCES items(id) ON DELETE CASCADE, mime TEXT NOT NULL, data BLOB NOT NULL);
+            PRAGMA application_id = 0x5A495053;
+            PRAGMA user_version = 2;").unwrap();
+        conn.execute(
+            "INSERT INTO spaces VALUES ('home',NULL,?1)",
+            [json(&space("home", None)).unwrap()],
+        )
+        .unwrap();
+        for (id, photo) in [("cup", Some("photo-1")), ("bowl", None)] {
+            conn.execute(
+                "INSERT INTO items VALUES (?1,'home',?2)",
+                params![id, json(&old_item(id, photo)).unwrap()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO photos VALUES ('photo-1','cup','image/jpeg',?1)",
+            [vec![0xFFu8, 0xD8, 0xFF, 0xD9]],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut db = Store::open(&path).unwrap();
+        assert_eq!(user_version(&db.conn).unwrap(), SCHEMA_VERSION);
+        let data = db.snapshot().unwrap();
+        assert_eq!(data.items[0].photos, ["photo-1"]);
+        assert!(data.items[0].photo.is_none());
+        assert!(data.items[1].photos.is_empty());
+        assert_eq!(
+            db.file("photo-1").unwrap().unwrap().data,
+            [0xFF, 0xD8, 0xFF, 0xD9]
+        );
+        let tables: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name = 'photos'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
+        // The upgraded item accepts a second photo.
+        let mut cup = data.items[0].clone();
+        cup.photos.push(PNG.into());
+        assert_eq!(db.save_item(cup).unwrap().items.len(), 2);
+        assert_eq!(file_rows(&db), 2);
+        let saved: Vec<_> = fs::read_dir(dir.path().join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].starts_with("before-upgrade-v2-"), "{}", saved[0]);
     }
 
     #[test]
@@ -1038,7 +1332,7 @@ mod tests {
         ] {
             conn.execute(
                 "INSERT INTO items VALUES (?1,'home',?2)",
-                params![id, json(&item(id, photo)).unwrap()],
+                params![id, json(&old_item(id, photo)).unwrap()],
             )
             .unwrap();
         }
@@ -1052,12 +1346,13 @@ mod tests {
                 .iter()
                 .find(|i| i.id == id)
                 .unwrap()
-                .photo
-                .clone()
+                .photos
+                .first()
+                .cloned()
         };
         let cup = photo("cup").unwrap();
         assert_eq!(
-            db.photo(&cup).unwrap().unwrap().data,
+            db.file(&cup).unwrap().unwrap().data,
             [0xFF, 0xD8, 0xFF, 0xD9]
         );
         assert_eq!(photo("plate"), None, "an undecodable photo is dropped");
@@ -1077,10 +1372,7 @@ mod tests {
         let mut restored = store();
         let data = restored.restore(&source).unwrap();
         let cup = data.items.iter().find(|i| i.id == "cup").unwrap();
-        assert!(restored
-            .photo(cup.photo.as_deref().unwrap())
-            .unwrap()
-            .is_some());
+        assert!(restored.file(&cup.photos[0]).unwrap().is_some());
         // Opening again does not repeat the upgrade backup.
         drop(db);
         Store::open(&path).unwrap();
@@ -1135,11 +1427,14 @@ mod tests {
             quantity: 2.0,
             unit: "개".into(),
             notes: "".into(),
-            photo: Some("data:image/jpeg;base64,/9j/2Q==".into()),
+            photos: vec!["data:image/jpeg;base64,/9j/2Q==".into()],
+            photo: None,
+            attachments: vec![],
             expires_on: Some("2026-11-15".into()),
             purchased_on: Some("2026-11-07".into()),
             purchase_store: "마트".into(),
             purchase_price: Some(4800),
+            warranty_until: None,
         };
         db.save_item(item.clone()).unwrap();
         let mut t = crate::schedule::tests::task();
@@ -1147,13 +1442,13 @@ mod tests {
         t.item_id = Some(item.id.clone());
         db.save_task(t).unwrap();
         assert!(db.delete("item", &item.id).is_err());
-        let photo_id = db.snapshot().unwrap().items[0].photo.clone().unwrap();
+        let photo_id = db.snapshot().unwrap().items[0].photos[0].clone();
         drop(db);
         let reopened = Store::open(&path).unwrap();
         let restored = reopened.snapshot().unwrap();
-        assert_eq!(restored.items[0].photo.as_deref(), Some(photo_id.as_str()));
+        assert_eq!(restored.items[0].photos, std::slice::from_ref(&photo_id));
         assert_eq!(
-            reopened.photo(&photo_id).unwrap().unwrap().data,
+            reopened.file(&photo_id).unwrap().unwrap().data,
             [0xFF, 0xD8, 0xFF, 0xD9]
         );
         assert_eq!(restored.items[0].purchase_price, Some(4800));
@@ -1224,6 +1519,71 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn snoozing_moves_only_the_current_occurrence_and_rearms_notifications() {
+        let mut db = store();
+        db.save_space(space("home", None)).unwrap();
+        db.set_settings(Settings {
+            notifications: true,
+        })
+        .unwrap();
+        // Monthly on the 31st, Seoul time.
+        let t = crate::schedule::tests::task();
+        db.save_task(t.clone()).unwrap();
+        let due = parse_time(&t.due_at).unwrap();
+        db.mark_notified(&db.reminders_at(due).unwrap()[0]).unwrap();
+        let revision = db.revision().unwrap();
+
+        assert!(db.snooze(&t.id, &t.due_at, &t.due_at).is_err());
+        assert!(db.snooze(&t.id, &t.due_at, "2026-01-30T00:00:00Z").is_err());
+        assert!(db
+            .snooze(&t.id, "2026-01-01T00:00:00Z", "2026-02-03T00:00:00Z")
+            .is_err());
+        assert!(db.snooze(&t.id, &t.due_at, "내일").is_err());
+        assert_eq!(db.revision().unwrap(), revision);
+
+        // The same instant may be written with another offset.
+        let data = db
+            .snooze(
+                &t.id,
+                "2026-01-31T09:00:00+09:00",
+                "2026-02-03T09:00:00+09:00",
+            )
+            .unwrap();
+        let snoozed = data.tasks[0].clone();
+        assert_eq!(
+            parse_time(&snoozed.due_at).unwrap(),
+            parse_time("2026-02-03T00:00:00Z").unwrap()
+        );
+        assert_eq!(snoozed.anchor_at, t.anchor_at);
+        assert!(snoozed.notified_due_at.is_none());
+        assert_eq!(db.revision().unwrap(), revision + 1);
+        assert!(db.reminders_at(due).unwrap().is_empty());
+        assert_eq!(
+            db.reminders_at(parse_time(&snoozed.due_at).unwrap())
+                .unwrap()
+                .len(),
+            1
+        );
+        // The next occurrence returns to the original monthly dates, as if
+        // the task had never been snoozed.
+        let done = db.finish(&t.id, &snoozed.due_at, "completed").unwrap();
+        assert_eq!(
+            done.tasks[0].due_at,
+            next_due(&t, Utc::now()).unwrap().unwrap()
+        );
+        assert_eq!(done.records[0].scheduled_for, snoozed.due_at);
+        // A finished one-time task cannot be snoozed.
+        let mut once = t.clone();
+        once.id = "once".into();
+        once.mode = "once".into();
+        db.save_task(once.clone()).unwrap();
+        db.finish("once", &once.due_at, "skipped").unwrap();
+        assert!(db
+            .snooze("once", &once.due_at, "2026-02-03T00:00:00Z")
+            .is_err());
     }
 
     #[test]
